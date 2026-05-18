@@ -1,0 +1,190 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+
+    // ── ENVIRONMENT SETUP ─────────────────────────────────────────────────
+    {
+      "label": "⚙ Setup: Create venv + install deps",
+      "type": "shell",
+      "command": "python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt",
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+
+    {
+      "label": "⚙ Install: pip install -r requirements.txt",
+      "type": "shell",
+      "command": "pip install -r requirements.txt",
+      "problemMatcher": [],
+      "group": "build"
+    },
+
+    // ── LINTING & FORMATTING ──────────────────────────────────────────────
+    {
+      "label": "✅ Lint: black (format check)",
+      "type": "shell",
+      "command": "black --check --line-length 100 data_agent.py strategy_agent.py risk_agent.py main.py",
+      "problemMatcher": ["$python"],
+      "group": "build"
+    },
+
+    {
+      "label": "✏ Format: black (apply)",
+      "type": "shell",
+      "command": "black --line-length 100 data_agent.py strategy_agent.py risk_agent.py main.py",
+      "problemMatcher": [],
+      "group": "build"
+    },
+
+    {
+      "label": "✅ Lint: ruff",
+      "type": "shell",
+      "command": "ruff check data_agent.py strategy_agent.py risk_agent.py main.py",
+      "problemMatcher": ["$python"],
+      "group": "test"
+    },
+
+    {
+      "label": "✅ Type-check: mypy",
+      "type": "shell",
+      "command": "mypy data_agent.py strategy_agent.py risk_agent.py main.py --ignore-missing-imports",
+      "problemMatcher": ["$python"],
+      "group": "test"
+    },
+
+    // ── TESTS ─────────────────────────────────────────────────────────────
+    {
+      "label": "🧪 Test: all",
+      "type": "shell",
+      "command": "pytest tests/ -v --tb=short --no-header -q",
+      "problemMatcher": ["$python"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+
+    {
+      "label": "🧪 Test: data_agent",
+      "type": "shell",
+      "command": "pytest tests/test_data_agent.py -v --tb=long",
+      "problemMatcher": ["$python"],
+      "group": "test"
+    },
+
+    {
+      "label": "🧪 Test: strategy_agent (BSM / Black-76)",
+      "type": "shell",
+      "command": "pytest tests/test_strategy_agent.py -v --tb=long",
+      "problemMatcher": ["$python"],
+      "group": "test"
+    },
+
+    {
+      "label": "🧪 Test: risk_agent (VaR / stress)",
+      "type": "shell",
+      "command": "pytest tests/test_risk_agent.py -v --tb=long",
+      "problemMatcher": ["$python"],
+      "group": "test"
+    },
+
+    {
+      "label": "🧪 Test: coverage report",
+      "type": "shell",
+      "command": "pytest tests/ --cov=. --cov-report=term-missing --cov-report=html:htmlcov",
+      "problemMatcher": ["$python"],
+      "group": "test"
+    },
+
+    // ── PIPELINE EXECUTION ────────────────────────────────────────────────
+    {
+      "label": "▶ Run: Full Pipeline (WTI)",
+      "type": "shell",
+      "command": "python main.py --ticker CL=F",
+      "problemMatcher": ["$python"],
+      "group": "none",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+
+    {
+      "label": "📊 Run: Black-76 Demo",
+      "type": "shell",
+      "command": "python main.py --bsm-demo --spot 72.0 --sigma 0.32",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    {
+      "label": "📈 Run: Monte Carlo Demo",
+      "type": "shell",
+      "command": "python main.py --mc-demo",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    {
+      "label": "⚠ Run: Stress Tests",
+      "type": "shell",
+      "command": "python main.py --stress-only",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    {
+      "label": "📋 Run: PPM Report",
+      "type": "shell",
+      "command": "python main.py --ppm",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    {
+      "label": "🛡 Run: Risk Report",
+      "type": "shell",
+      "command": "python main.py --risk-report",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    // ── GIT WORKFLOW ──────────────────────────────────────────────────────
+    {
+      "label": "🔀 Git: status",
+      "type": "shell",
+      "command": "git status",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    {
+      "label": "🔀 Git: pull origin main",
+      "type": "shell",
+      "command": "git pull origin main",
+      "problemMatcher": [],
+      "group": "none"
+    },
+
+    // ── CI PRE-FLIGHT (mirrors GitHub Actions) ────────────────────────────
+    {
+      "label": "🚀 CI Pre-flight (lint + type + test)",
+      "dependsOn": [
+        "✅ Lint: black (format check)",
+        "✅ Lint: ruff",
+        "✅ Type-check: mypy",
+        "🧪 Test: all"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "group": "build"
+    }
+  ]
+}
