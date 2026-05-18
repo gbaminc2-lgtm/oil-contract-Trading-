@@ -1,0 +1,187 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+    // ── MAIN PIPELINE ─────────────────────────────────────────────────────
+    {
+      "name": "▶ Full Pipeline (WTI)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--ticker", "CL=F", "--fund", "Quant Energy Alpha Fund"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "LOG_LEVEL": "INFO"
+      }
+    },
+
+    {
+      "name": "▶ Full Pipeline (Brent)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--ticker", "BZ=F", "--fund", "Brent Alpha Fund"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+
+    // ── DEMO MODES ────────────────────────────────────────────────────────
+    {
+      "name": "📊 Black-76 Greeks Table",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--bsm-demo", "--spot", "72.0", "--sigma", "0.32"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "📈 Monte Carlo Demo (GBM + OU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--mc-demo", "--spot", "72.0", "--sigma", "0.32"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "⚠ Stress Test Report",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--stress-only"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "📋 PPM Report",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--ppm", "--fund", "Quant Energy Alpha Fund"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "🛡 Risk Report Only",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--risk-report"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    // ── INDIVIDUAL MODULE DEBUGGING ───────────────────────────────────────
+    {
+      "name": "🔧 Debug data_agent.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/data_agent.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "🔧 Debug strategy_agent.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/strategy_agent.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "🔧 Debug risk_agent.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/risk_agent.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    // ── PYTEST ────────────────────────────────────────────────────────────
+    {
+      "name": "🧪 Run All Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/", "-v", "--tb=short", "--no-header"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "🧪 Run Tests — data_agent",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/test_data_agent.py", "-v", "--tb=long"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "🧪 Run Tests — strategy_agent",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/test_strategy_agent.py", "-v", "--tb=long"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    {
+      "name": "🧪 Run Tests — risk_agent",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/test_risk_agent.py", "-v", "--tb=long"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    },
+
+    // ── CURRENT FILE (catch-all) ──────────────────────────────────────────
+    {
+      "name": "▷ Run Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "PYTHONPATH": "${workspaceFolder}" }
+    }
+  ],
+
+  "compounds": [
+    {
+      "name": "⚡ Full Suite (Pipeline + Tests)",
+      "configurations": [
+        "▶ Full Pipeline (WTI)",
+        "🧪 Run All Tests"
+      ],
+      "stopAll": true
+    }
+  ]
+}
