@@ -1,0 +1,76 @@
+{
+  "editor.formatOnSave": true,
+  "editor.rulers": [100],
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "editor.wordWrap": "off",
+  "editor.renderWhitespace": "boundary",
+  "editor.bracketPairColorization.enabled": true,
+  "editor.suggestSelection": "first",
+  "editor.inlineSuggest.enabled": true,
+
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.indexing": true,
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+  "python.terminal.activateEnvironment": true,
+
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+
+  "black-formatter.args": ["--line-length", "100"],
+
+  "isort.args": ["--profile", "black", "--line-length", "100"],
+
+  "jupyter.notebookFileRoot": "${workspaceFolder}",
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/*.egg-info": true,
+    "**/dist": true,
+    "**/build": true
+  },
+
+  "files.watcherExclude": {
+    "**/__pycache__/**": true,
+    "**/.venv/**": true
+  },
+
+  "search.exclude": {
+    "**/.venv": true,
+    "**/node_modules": true,
+    "**/__pycache__": true
+  },
+
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.defaultProfile.osx": "zsh",
+
+  "git.autofetch": true,
+  "git.confirmSync": false,
+  "git.enableSmartCommit": true,
+
+  "todo-tree.general.tags": ["TODO", "FIXME", "RISK:", "MODEL:", "PPM:"],
+  "todo-tree.highlights.defaultHighlight": {
+    "foreground": "#000",
+    "background": "#FFD700",
+    "icon": "alert",
+    "type": "text"
+  },
+
+  "workbench.colorCustomizations": {
+    "activityBar.background": "#0d1117",
+    "sideBar.background": "#0d1117",
+    "statusBar.background": "#1f2937"
+  },
+
+  "extensions.ignoreRecommendations": false
+}
