@@ -1,0 +1,48 @@
+name: Claude Trading Agent Review
+
+on:
+  push:
+    paths:
+      - 'oil_gas_agent.py'
+      - 'requirements.txt'
+  pull_request:
+    paths:
+      - 'oil_gas_agent.py'
+      - 'requirements.txt'
+  workflow_dispatch:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Claude Code Action Official
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are reviewing oil_gas_agent.py — a quantitative options trading agent for WTI crude oil.
+            It uses Black-Scholes pricing, delta-neutral hedging, and volatility arbitrage.
+
+            Please:
+            1. Review the Black-Scholes Greeks calculations for mathematical correctness
+            2. Identify any risk management gaps (e.g. gamma exposure, vega blowup, margin calls)
+            3. Check for concurrency issues in the async loops
+            4. Suggest improvements to the delta-hedging rebalance logic
+            5. Flag any production readiness concerns (error handling, reconnection logic, position limits)
+
+            Post your findings as a structured review comment.
