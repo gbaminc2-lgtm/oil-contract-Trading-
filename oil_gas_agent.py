@@ -59,7 +59,7 @@ class OilGasTradingAgent:
         self.current_pnl = 0.0
 
         # Mock State for demonstration (WTI Crude Proxy)
-        self.underlying_price = 75.50
+        self.underlying_price = 76.00
         self.risk_free_rate = 0.045
 
         # Simulated Open Positions: {option_id: {qty, strike, expiry_years, type, iv, delta}}
