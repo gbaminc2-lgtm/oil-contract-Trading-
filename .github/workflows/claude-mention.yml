@@ -14,6 +14,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - name: Claude Code Action Official
@@ -21,3 +22,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Someone has mentioned @claude in a comment. Please read the comment and the
+            surrounding context (issue or PR), then respond helpfully and directly to
+            whatever they asked or requested.
