@@ -1,0 +1,23 @@
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Claude Code Action Official
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            A new issue has been opened. Please:
+            1. Summarize the issue in one sentence
+            2. Label it as bug, feature, question, or documentation
+            3. Assess priority: high, medium, or low
+            4. Post a helpful reply acknowledging the issue and asking any clarifying questions needed
