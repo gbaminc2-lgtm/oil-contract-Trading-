@@ -6,7 +6,7 @@ System Role: Expert Quantitative Commodity Strategist (Institutional Grade)
 This is the master orchestrator connecting:
   data_agent.py     → market data, forward curves, GARCH, ML features
   strategy_agent.py → Black-76, Monte Carlo, NAV model, trade signals, PPM
-  risk_agent.py     → VaR, stress tests, Greeks limits, Basel III, approval gate
+  risk_engine.py    → VaR, stress tests, Greeks limits, Basel III, approval gate
 
 Pipeline sequence:
   ① Data ingestion (spot, curves, crack spreads, storage, IV surface, GARCH)
@@ -56,10 +56,11 @@ from strategy_agent import (
     train_ml_signal, ml_predict_direction,
     OptionRight, Direction, StrategyType, VolRegime, TradeSignal, NAVModel,
 )
-from risk_agent import (
+from risk_engine import (
     evaluate_trade, record_pnl, get_risk_summary, performance_report,
     run_stress_tests, stress_test_report, PortfolioGreeks,
     ApprovalStatus, FUND_EQUITY_USD, MAX_RISK_PER_TRADE_PCT,
+    DAILY_TARGET_USD, MAX_DAILY_LOSS_USD,
     StressScenario, DrawdownState,
 )
 
@@ -184,7 +185,6 @@ def generate_all_signals(data: dict) -> List[TradeSignal]:
 
 def evaluate_all_signals(
     signals: List[TradeSignal],
-    garch_sigma_ann: float,
     iv_rank: float,
 ) -> List[tuple]:
     """
@@ -198,11 +198,10 @@ def evaluate_all_signals(
 
     for sig in signals:
         assess = evaluate_trade(
-            signal           = sig,
-            portfolio_greeks = portfolio_greeks,
-            open_positions   = approved_count,
-            iv_rank          = iv_rank,
-            garch_sigma_ann  = garch_sigma_ann,
+            signal                = sig,
+            portfolio_greeks      = portfolio_greeks,
+            current_open_positions= approved_count,
+            iv_rank               = iv_rank,
         )
         results.append((sig, assess))
         print(assess.summary())
@@ -224,7 +223,7 @@ def build_financials(
 ) -> tuple:
     """Build NAV model and three-statement financials from approved signals."""
     logger.info("── FINANCIAL MODEL ─────────────────────────────────────")
-    nav        = build_nav_model(fund_name=fund_name, contracts=10)
+    nav        = build_nav_model(fund_name=fund_name, contracts=1)
     three_stmt = build_three_statement(nav, approved_signals, FUND_EQUITY_USD)
     print(three_stmt.summary())
     return nav, three_stmt
@@ -259,9 +258,10 @@ def run_mc_scenarios(
 # ============================================================================
 
 def run_all_stress_tests(
-    spot: float, garch_sigma_ann: float, net_long_bbls: float = 5_000.0,
+    spot: float, garch_sigma_ann: float, net_long_bbls: float = 100.0,
 ) -> List:
-    """Run all 8 named stress scenarios and print the report."""
+    """Run all 8 named stress scenarios and print the report.
+    100 bbl = 1 MCL micro contract (matching $500 account max position)."""
     logger.info("── STRESS TESTING ──────────────────────────────────────")
     results = run_stress_tests(spot, net_long_bbls, garch_sigma_ann, FUND_EQUITY_USD)
     print(stress_test_report(results))
@@ -306,7 +306,7 @@ def run_full_pipeline(
     print(f"  QUANT ENERGY COMMODITY PIPELINE")
     print(f"  {fund_name}")
     print(f"  {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"  Fund Equity: ${FUND_EQUITY_USD:,.0f} | Max Risk/Trade: {MAX_RISK_PER_TRADE_PCT:.0%}")
+    print(f"  Starting Capital: ${FUND_EQUITY_USD:,.0f} | Daily Target: $5,000 | Max Risk/Trade: {MAX_RISK_PER_TRADE_PCT:.0%}")
     print(f"{WIDE}\n")
 
     # ① Data
@@ -320,7 +320,7 @@ def run_full_pipeline(
 
     # ④ Risk approval
     evaluated = evaluate_all_signals(
-        candidate_signals, data["garch"].sigma_annual, data["iv_rank"]
+        candidate_signals, data["iv_rank"]
     )
     approved = [s for s, a in evaluated if a.status != ApprovalStatus.REJECTED]
 
@@ -475,7 +475,7 @@ def _print_trade_card(sig: TradeSignal, assess) -> None:
     print(f"\n  ╔═ TRADE: {sig.ticker} {'═'*48}")
     print(f"  ║  Strategy:  {sig.strategy.value}")
     print(f"  ║  Direction: {sig.direction.value}  |  Vol Regime: {sig.vol_regime.value}")
-    print(f"  ║  Contracts: {assess.approved_contracts}  |  DTE: {sig.dte}d  |  Conf: {sig.confidence:.0%}")
+    print(f"  ║  Contracts: {assess.approved_qty}  |  DTE: {sig.dte}d  |  Conf: {sig.confidence:.0%}")
     print(f"  ║  Entry:     ${sig.entry_price:.2f}  Target: ${sig.target_price:.2f}  Stop: ${sig.stop_price:.2f}")
     print(f"  ║  Max Profit:${sig.max_profit:>10,.0f}  Max Loss: ${sig.max_loss:>10,.0f}")
     if rr:

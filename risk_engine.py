@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from strategy_agent import BSMResult, TradeSignal, Direction, StrategyType
+from strategy_agent import Greeks as BSMResult, TradeSignal, Direction, StrategyType
 
 logger = logging.getLogger(__name__)
 
@@ -45,22 +45,24 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Account & Allocation Limits
+# Starting capital: $500.00  |  Daily target: $5,000
+# Heitkoetter Ch.4: scale all dollar limits proportionally to account size.
 # ---------------------------------------------------------------------------
-ACCOUNT_EQUITY_USD           = 100_000.00
+ACCOUNT_EQUITY_USD           = 500.00
 MAX_RISK_PER_TRADE_PCT       = 0.02
-MAX_RISK_PER_TRADE_USD       = ACCOUNT_EQUITY_USD * MAX_RISK_PER_TRADE_PCT   # $2,000
+MAX_RISK_PER_TRADE_USD       = ACCOUNT_EQUITY_USD * MAX_RISK_PER_TRADE_PCT   # $10.00
 
 MAX_PORTFOLIO_RISK_PCT       = 0.10
-MAX_PORTFOLIO_RISK_USD       = ACCOUNT_EQUITY_USD * MAX_PORTFOLIO_RISK_PCT   # $10,000
+MAX_PORTFOLIO_RISK_USD       = ACCOUNT_EQUITY_USD * MAX_PORTFOLIO_RISK_PCT   # $50.00
 
 MAX_SECTOR_CONCENTRATION_PCT = 0.25
 MAX_SINGLE_TICKER_PCT        = 0.15
 
 # ---------------------------------------------------------------------------
-# Options-Specific Limits (Bittman / Sherbin)
+# Options-Specific Limits (Bittman / Sherbin — scaled to $500 account)
 # ---------------------------------------------------------------------------
-MAX_OPEN_OPTIONS_POSITIONS   = 10
-MAX_CONTRACTS_PER_POSITION   = 20
+MAX_OPEN_OPTIONS_POSITIONS   = 3
+MAX_CONTRACTS_PER_POSITION   = 1
 MIN_DTE_ENTRY                = 21
 MAX_DTE_ENTRY                = 90
 MIN_OPTION_LIQUIDITY_OI      = 100
@@ -68,35 +70,38 @@ MIN_BID_ASK_WIDTH_FILTER     = 0.50
 MAX_IV_RANK_FOR_DEBIT        = 50
 MIN_IV_RANK_FOR_CREDIT       = 50
 
-# Portfolio Greeks hard limits (per 100 shares / 1 contract)
-MAX_PORTFOLIO_DELTA          = 200.0
-MAX_PORTFOLIO_GAMMA          = 50.0
-MAX_PORTFOLIO_THETA_NEGATIVE = -500.0
-MAX_PORTFOLIO_VEGA           = 10_000.0
+# Portfolio Greeks hard limits (scaled to $500 micro account)
+MAX_PORTFOLIO_DELTA          = 20.0
+MAX_PORTFOLIO_GAMMA          = 5.0
+MAX_PORTFOLIO_THETA_NEGATIVE = -50.0
+MAX_PORTFOLIO_VEGA           = 500.0
 
 # ---------------------------------------------------------------------------
-# Futures-Specific Limits — WTI / NYMEX Chapter 200
+# Futures-Specific Limits — Micro WTI MCL / NYMEX
+# MCL: 100 bbl/contract, tick=$0.01/bbl=$1.00, margin~$1,000
+# With $500 account: paper-trade MCL; 1 contract max; tight $0.10/bbl stops
 # ---------------------------------------------------------------------------
-WTI_CONTRACT_SIZE_BBL        = 1_000
-WTI_INITIAL_MARGIN_USD       = 6_000
-WTI_MAINTENANCE_MARGIN_USD   = 5_500
-MAX_WTI_CONTRACTS            = 3
-MAX_WTI_LOSS_PER_CONTRACT_USD= 2_000
-WTI_TICK_VALUE_USD           = 10.00
+WTI_CONTRACT_SIZE_BBL        = 100         # MCL micro contract (1/10 of CL)
+WTI_INITIAL_MARGIN_USD       = 1_000       # MCL approximate initial margin
+WTI_MAINTENANCE_MARGIN_USD   = 800         # MCL maintenance margin
+MAX_WTI_CONTRACTS            = 1           # 1 micro contract max at $500
+MAX_WTI_LOSS_PER_CONTRACT_USD= 10.00       # 2% of $500 = $10 hard limit
+WTI_TICK_VALUE_USD           = 1.00        # MCL tick value ($0.01/bbl × 100 bbl)
 
 # ---------------------------------------------------------------------------
-# Day-Trading Limits (Heitkoetter Ch.3)
+# Day-Trading Limits (Heitkoetter Ch.3 — scaled to $500)
+# $100 daily loss limit = 20% of equity (protective circuit-breaker)
 # ---------------------------------------------------------------------------
-MAX_DAILY_LOSS_USD           = 1_500
+MAX_DAILY_LOSS_USD           = 100
 MAX_TRADES_PER_DAY           = 5
 MAX_CONSECUTIVE_LOSSES       = 3
 
 # ---------------------------------------------------------------------------
-# VaR Parameters (Hull Ch.9 / IMCA Handbook)
+# VaR Parameters (Hull Ch.9 / IMCA Handbook — scaled to $500)
 # ---------------------------------------------------------------------------
 VAR_CONFIDENCE_LEVEL         = 0.99
 VAR_LOOKBACK_DAYS            = 252
-MAX_VAR_USD                  = 5_000
+MAX_VAR_USD                  = 50          # 10% of $500 equity
 EXPECTED_SHORTFALL_MULTIPLIER= 1.3
 
 # ---------------------------------------------------------------------------
@@ -105,6 +110,11 @@ EXPECTED_SHORTFALL_MULTIPLIER= 1.3
 KELLY_FRACTION_CAP           = 0.25
 WIN_RATE_CONSERVATIVE        = 0.50
 PAYOFF_RATIO_CONSERVATIVE    = 1.5
+
+# ---------------------------------------------------------------------------
+# Daily Profit Target
+# ---------------------------------------------------------------------------
+DAILY_TARGET_USD             = 5_000.0     # $5,000/day target (paper-trading)
 
 
 # ============================================================================
@@ -442,13 +452,13 @@ def evaluate_trade(
 
     # 5. IV-rank filter
     credit_strategies = {
-        StrategyType.VERTICAL_PUT_CREDIT, StrategyType.VERTICAL_CALL_CREDIT,
-        StrategyType.IRON_CONDOR, StrategyType.IRON_BUTTERFLY,
-        StrategyType.SHORT_CALL, StrategyType.SHORT_PUT,
+        StrategyType.IRON_CONDOR,
+        StrategyType.COLLAR,
     }
     debit_strategies = {
-        StrategyType.VERTICAL_CALL_DEBIT, StrategyType.VERTICAL_PUT_DEBIT,
-        StrategyType.LONG_CALL, StrategyType.LONG_PUT, StrategyType.CALENDAR_SPREAD,
+        StrategyType.LONG_CALL, StrategyType.LONG_PUT,
+        StrategyType.CALENDAR_SPREAD,
+        StrategyType.BULL_CALL_SPREAD, StrategyType.BEAR_PUT_SPREAD,
     }
 
     if signal.strategy in credit_strategies and iv_rank < MIN_IV_RANK_FOR_CREDIT:
@@ -508,7 +518,7 @@ def evaluate_trade(
     # 10. Kelly cross-check
     kf = kelly_position_size(
         win_rate = WIN_RATE_CONSERVATIVE,
-        avg_win  = signal.risk_reward() or PAYOFF_RATIO_CONSERVATIVE,
+        avg_win  = signal.risk_reward or PAYOFF_RATIO_CONSERVATIVE,
     )
 
     max_loss_usd = max_loss_per_contract * approved_qty
@@ -557,3 +567,137 @@ def get_risk_summary() -> Dict:
         "max_daily_loss_usd"       : MAX_DAILY_LOSS_USD,
         "max_var_1d_99_usd"        : MAX_VAR_USD,
     }
+
+
+# ============================================================================
+# SECTION 7 — BACKWARD-COMPATIBLE ALIASES
+# (main.py was written against risk_agent.py; these keep it runnable)
+# ============================================================================
+
+FUND_EQUITY_USD    = ACCOUNT_EQUITY_USD   # name used throughout main.py & CLAUDE.md
+DrawdownState      = DrawdownTracker       # old class name
+record_pnl         = record_trade_result  # old function name
+
+
+# ============================================================================
+# SECTION 8 — STRESS TESTING
+# 8 named energy-market scenarios (Hull Ch.17 / Basel III / PPM constraint)
+# ============================================================================
+
+@dataclass
+class StressScenario:
+    """Single named stress scenario result.
+
+    Hull Ch.17: stress tests must cover historically observed extreme moves
+    AND plausible future shocks not seen in recent data.
+    """
+    name:          str
+    price_shock:   float   # $/bbl change applied to spot
+    shock_pct:     float   # percentage price change
+    pnl_usd:       float   # estimated P&L on net_long_bbls position
+    nav_impact_pct:float   # P&L as % of fund equity
+    exceeds_limit: bool    # True if |nav_impact_pct| > 15% (PPM gate)
+    description:   str     = ""
+
+
+# 8 canonical energy stress scenarios sourced from historical precedent
+_STRESS_SCENARIOS: List[Tuple[str, float, str]] = [
+    # (name, price_shock_pct, description)
+    ("WTI 2014 Supply Glut",       -0.60, "OPEC no-cut; US shale surge — WTI fell from $107 to $43"),
+    ("COVID Demand Collapse 2020",  -0.70, "Global lockdown; WTI Apr-20 contract settled at -$37/bbl"),
+    ("Gulf War Supply Shock 1990",  +0.70, "Iraq invades Kuwait; WTI doubled in 3 months"),
+    ("Russia-Ukraine Spike 2022",   +0.45, "EU sanctions; Brent touched $139/bbl (Mar 2022)"),
+    ("OPEC+ Surprise Cut",          +0.25, "Coordinated 1 mbpd+ unannounced cut"),
+    ("Hurricane Katrina Disruption",+0.20, "US Gulf Coast offline; 25% of US production lost"),
+    ("USD Strengthening Shock",     -0.15, "DXY +10%; commodities historically -15% correlated"),
+    ("Demand Recession Slowdown",   -0.30, "Global GDP -2%; IEA demand forecast cut 2 mbpd"),
+]
+
+
+def run_stress_tests(
+    spot:           float,
+    net_long_bbls:  float,
+    sigma_annual:   float,
+    fund_equity:    float,
+    max_nav_loss:   float = 0.15,
+) -> List[StressScenario]:
+    """
+    Apply all 8 named stress scenarios to the current position.
+
+    Hull Ch.17 / PPM constraint: maximum tolerated NAV drawdown = 15%.
+    The stress P&L is computed as a simple linear shock (no Greeks).
+    For options positions, a full vega/gamma adjustment is needed at
+    the strategy layer — this function provides the futures-equivalent floor.
+
+    Args:
+        spot:          Current WTI spot price ($/bbl).
+        net_long_bbls: Net barrel exposure (positive = long, negative = short).
+        sigma_annual:  Annualised GARCH volatility (for vol-scaled scenarios).
+        fund_equity:   Total fund equity in USD.
+        max_nav_loss:  NAV loss threshold that triggers exceeds_limit flag (default 15%).
+    """
+    results: List[StressScenario] = []
+    for name, shock_pct, description in _STRESS_SCENARIOS:
+        price_shock  = spot * shock_pct
+        pnl_usd      = net_long_bbls * price_shock
+        nav_impact   = pnl_usd / fund_equity if fund_equity > 0 else 0.0
+        results.append(StressScenario(
+            name           = name,
+            price_shock    = price_shock,
+            shock_pct      = shock_pct,
+            pnl_usd        = pnl_usd,
+            nav_impact_pct = nav_impact,
+            exceeds_limit  = abs(nav_impact) > max_nav_loss,
+            description    = description,
+        ))
+    return results
+
+
+def stress_test_report(results: List[StressScenario]) -> str:
+    """Format stress test results as a printable report string."""
+    sep   = "─" * 72
+    lines = [
+        "═" * 72,
+        "  STRESS TEST REPORT  (8 Named Energy Scenarios)",
+        "  Hull Ch.17 · Basel III · PPM 15% NAV Limit",
+        sep,
+        f"  {'Scenario':<35} {'Shock':>7} {'P&L':>12} {'NAV %':>7}  {'Status':>8}",
+        sep,
+    ]
+    for r in results:
+        flag   = "⚠ BREACH" if r.exceeds_limit else "  ok"
+        lines.append(
+            f"  {r.name:<35} {r.shock_pct:>+6.0%} "
+            f"${r.pnl_usd:>+11,.0f} {r.nav_impact_pct:>+6.1%}  {flag}"
+        )
+    breach_count = sum(r.exceeds_limit for r in results)
+    lines += [
+        sep,
+        f"  Scenarios breaching 15% NAV limit: {breach_count} / {len(results)}",
+        "═" * 72,
+    ]
+    return "\n".join(lines)
+
+
+def performance_report() -> str:
+    """Return a formatted risk-state and performance string for display."""
+    s   = get_risk_summary()
+    sep = "─" * 60
+    lines = [
+        "═" * 60,
+        "  RISK & PERFORMANCE REPORT",
+        sep,
+        f"  Account Equity      : ${s['account_equity']:>12,.2f}",
+        f"  Peak Equity         : ${s['peak_equity']:>12,.2f}",
+        f"  Current Drawdown    : {s['drawdown_pct']:>11.2f}%",
+        f"  Max Historical DD   : {s['max_drawdown_pct']:>11.2f}%",
+        f"  Daily Loss Today    : ${s['daily_loss_today_usd']:>12,.2f}",
+        f"  Consecutive Losses  : {s['consecutive_losses']:>12d}",
+        sep,
+        f"  Max Risk / Trade    : ${s['max_risk_per_trade_usd']:>12,.2f}",
+        f"  Max Portfolio Risk  : ${s['max_portfolio_risk_usd']:>12,.2f}",
+        f"  Max Daily Loss Gate : ${s['max_daily_loss_usd']:>12,.2f}",
+        f"  Max 1-Day 99% VaR   : ${s['max_var_1d_99_usd']:>12,.2f}",
+        "═" * 60,
+    ]
+    return "\n".join(lines)

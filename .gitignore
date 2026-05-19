@@ -95,6 +95,9 @@ ehthumbs.db
 Thumbs.db
 desktop.ini
 
+# ── Claude Code local settings (personal overrides, not team config) ─────────
+.claude/settings.local.json
+
 # ── IDEs (keep .vscode/ committed for team settings) ─────────────────────────
 .idea/
 *.swp
