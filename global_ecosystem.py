@@ -61,6 +61,13 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+# ── Load .env file if present (never committed — see .gitignore) ──────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env", override=False)
+except ImportError:
+    pass  # python-dotenv optional — set env vars directly if not installed
+
 # ── Optional heavy dependencies ───────────────────────────────────────────────
 try:
     import xgboost as xgb;  _XGB = True

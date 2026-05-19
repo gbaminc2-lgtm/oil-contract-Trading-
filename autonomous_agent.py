@@ -62,6 +62,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# ── Load .env file if present (never committed — see .gitignore) ──────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env", override=False)
+except ImportError:
+    pass
+
 # ── Risk engine (single source of truth for all limits) ──────────────────────
 try:
     from risk_engine import (
