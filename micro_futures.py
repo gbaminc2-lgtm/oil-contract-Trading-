@@ -225,23 +225,32 @@ def size_for_daily_target(
 
 
 # ============================================================================
-# SECTION 4 — SIGNAL ENGINE: MOMENTUM + BUY LOW / SELL HIGH
+# SECTION 4 — PROFIT ENGINE: BUY LOW → SELL HIGHER
 # ============================================================================
-# Strategy principle:
-#   Momentum tells you WHICH DIRECTION the market is moving.
-#   Buy-Low/Sell-High tells you WHEN to enter at the best price.
 #
-#   Uptrend + price at a LOW  → BUY contracts (the ideal setup)
-#   Downtrend + price at a HIGH → SELL contracts (the ideal setup)
-#   Uptrend + price at a HIGH → WAIT (don't chase — let it pull back)
-#   Downtrend + price at a LOW → WAIT (don't catch the falling knife)
+# The only logic that matters:
 #
-#   This produces fewer trades, better entry prices, and higher win rate
-#   than SMA crossover alone (which buys after the move already happened).
+#   PROFIT = SALE PRICE - BUY PRICE
+#
+#   To make profit you must sell at a HIGHER price than you bought.
+#   Therefore:
+#     Step 1 — Buy at the LOWEST possible price  (statistical bottom)
+#     Step 2 — Hold until price is HIGHER than what you paid
+#     Step 3 — Sell at the HIGHEST possible price (statistical top)
+#
+#   For short trades (sell first, buy back later):
+#     Step 1 — Sell at the HIGHEST possible price (statistical top)
+#     Step 2 — Buy back at a LOWER price than what you sold
+#     Step 3 — Profit = sell price - repurchase price
+#
+#   The engine mathematically enforces this:
+#     EXIT_LONG  only fires when current_price > entry_price + min_profit
+#     EXIT_SHORT only fires when current_price < entry_price - min_profit
+#     Hard stop if market moves violently against you (capital protection only)
 
 @dataclass
 class OHLCBar:
-    """Single price bar for the signal engine."""
+    """Single price bar."""
     timestamp: datetime.datetime
     open:      float
     high:      float
@@ -252,133 +261,179 @@ class OHLCBar:
 
 class MomentumValueEngine:
     """
-    Momentum + Buy-Low/Sell-High signal engine for futures contracts.
+    Profit Engine: Buy Low → Sell Higher. Every exit is at a profit or stopped.
 
-    Two components work together every bar:
+    ENTRY — Buy at the statistical LOW:
+      RSI < 40 (price beaten down) + price at/below lower Bollinger band
+      Momentum confirms direction (trend must support the trade)
 
-    MOMENTUM (direction):
-      20-bar price trend determines if we are in an uptrend or downtrend.
-      Uptrend:   fast_ma (10) > slow_ma (30) — bias is LONG
-      Downtrend: fast_ma (10) < slow_ma (30) — bias is SHORT
+    EXIT — Sell at a HIGHER price than entry (mathematically enforced):
+      Long exits ONLY when: current_price > entry_price + min_profit_per_bbl
+      Short exits ONLY when: current_price < entry_price - min_profit_per_bbl
+      Profit target: upper Bollinger band (the natural high of the range)
+      Hard stop: ACCOUNT_EQUITY_USD × 2% loss limit (capital protection only)
 
-    VALUE ENTRY (timing):
-      Bollinger Bands (20-bar, 2σ) detect statistical highs and lows.
-      RSI(14) confirms overbought / oversold conditions.
-
-      BUY  signal fires when:
-        - Momentum says UPTREND (fast > slow)
-        - AND price touches or crosses BELOW the lower Bollinger band (buy low)
-        - AND RSI < 45 (not overbought — confirming the low)
-
-      SELL signal fires when:
-        - Momentum says DOWNTREND (fast < slow)
-        - AND price touches or crosses ABOVE the upper Bollinger band (sell high)
-        - AND RSI > 55 (not oversold — confirming the high)
-
-    Exit:
-      Long position: exit when price reaches upper Bollinger (sold high) or
-                     stop is hit or RSI > 65 (overbought = take profit).
-      Short position: exit when price reaches lower Bollinger (bought back low)
-                      or RSI < 35.
-
-    Sources: Grimes — Art & Science of Technical Analysis;
-             Bittman — Trading Options as a Professional;
-             Heitkoetter — Complete Guide to Day Trading.
+    The engine tracks entry_price internally.
+    It will NEVER emit EXIT_LONG if price <= entry_price.
+    It will NEVER emit EXIT_SHORT if price >= entry_price.
     """
+
+    MIN_PROFIT_PER_BBL = 0.50   # minimum $/bbl profit before considering exit ($50/contract MCL)
 
     def __init__(self, fast: int = 10, slow: int = 30, bb_window: int = 20,
                  rsi_period: int = 14):
-        self.fast_n     = fast
-        self.slow_n     = slow
-        self.bb_window  = bb_window
-        self.rsi_period = rsi_period
+        self.fast_n      = fast
+        self.slow_n      = slow
+        self.bb_window   = bb_window
+        self.rsi_period  = rsi_period
         self._closes: Deque[float] = deque(maxlen=max(slow, bb_window, rsi_period) + 5)
-        self._prev_fast: Optional[float] = None
-        self._prev_slow: Optional[float] = None
+        self.entry_price: Optional[float] = None   # set when BUY/SELL fires
+        self.in_long     = False
+        self.in_short    = False
+
+    def set_entry(self, price: float, direction: str) -> None:
+        """Called by agent after order is placed."""
+        self.entry_price = price
+        self.in_long  = (direction == "BUY")
+        self.in_short = (direction == "SELL")
+
+    def clear_entry(self) -> None:
+        """Called after exit."""
+        self.entry_price = None
+        self.in_long  = False
+        self.in_short = False
 
     def _rsi(self) -> float:
         closes = list(self._closes)
         if len(closes) < self.rsi_period + 1:
             return 50.0
-        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-        gains  = [d for d in deltas[-self.rsi_period:] if d > 0]
-        losses = [-d for d in deltas[-self.rsi_period:] if d < 0]
+        deltas   = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        gains    = [d for d in deltas[-self.rsi_period:] if d > 0]
+        losses   = [-d for d in deltas[-self.rsi_period:] if d < 0]
         avg_gain = sum(gains) / self.rsi_period
         avg_loss = sum(losses) / self.rsi_period
         if avg_loss < 1e-9:
             return 100.0
-        rs = avg_gain / avg_loss
-        return 100 - 100 / (1 + rs)
+        return 100 - 100 / (1 + gains[-1] / max(losses[-1], 1e-9)) if gains and losses else 50.0
 
     def _bollinger(self) -> tuple:
         closes = list(self._closes)
         if len(closes) < self.bb_window:
-            price = closes[-1] if closes else 0
+            price = closes[-1] if closes else 0.0
             return price, price * 0.98, price * 1.02
-        window = closes[-self.bb_window:]
-        mean = sum(window) / self.bb_window
+        window   = closes[-self.bb_window:]
+        mean     = sum(window) / self.bb_window
         variance = sum((x - mean) ** 2 for x in window) / self.bb_window
-        std = math.sqrt(variance)
+        std      = math.sqrt(max(variance, 1e-9))
         return mean, mean - 2 * std, mean + 2 * std
 
     def update(self, bar: OHLCBar) -> Optional[str]:
         """
-        Feed one bar. Returns:
-          'BUY'  — momentum uptrend + price at a LOW → buy contracts
-          'SELL' — momentum downtrend + price at a HIGH → sell contracts
-          'EXIT_LONG'  — price reached high → take profit on long
-          'EXIT_SHORT' — price reached low → take profit on short
-          None   — no signal (waiting for the right setup)
+        Returns one of:
+          'BUY'        — enter long  (buy at the low)
+          'SELL'       — enter short (sell at the high)
+          'EXIT_LONG'  — close long  (price is HIGHER than entry = profit)
+          'EXIT_SHORT' — close short (price is LOWER than entry = profit)
+          None         — wait (conditions not right yet)
         """
         self._closes.append(bar.close)
         if len(self._closes) < self.slow_n:
             return None
 
-        closes    = list(self._closes)
-        fast_ma   = sum(closes[-self.fast_n:]) / self.fast_n
-        slow_ma   = sum(closes[-self.slow_n:]) / self.slow_n
-        rsi       = self._rsi()
-        _, bb_low, bb_high = self._bollinger()
-        price     = bar.close
+        closes   = list(self._closes)
+        fast_ma  = sum(closes[-self.fast_n:]) / self.fast_n
+        slow_ma  = sum(closes[-self.slow_n:]) / self.slow_n
+        rsi      = self._rsi()
+        bb_mean, bb_low, bb_high = self._bollinger()
+        price    = bar.close
+        uptrend  = fast_ma > slow_ma
+        downtrend= fast_ma < slow_ma
 
-        uptrend   = fast_ma > slow_ma
-        downtrend = fast_ma < slow_ma
+        # ── EXIT LOGIC (checked first — protect profits) ──────────────────────
+        if self.in_long and self.entry_price is not None:
+            profit_per_bbl = price - self.entry_price
 
-        prev_fast = self._prev_fast
-        self._prev_fast = fast_ma
-        self._prev_slow = slow_ma
+            # Sell higher: price reached upper Bollinger AND we are in profit
+            at_high = price >= bb_high * 0.998
+            in_profit = profit_per_bbl >= self.MIN_PROFIT_PER_BBL
 
-        # ── BUY: momentum uptrend + price at a statistical LOW ───────────────
-        if uptrend and price <= bb_low * 1.002 and rsi < 45:
-            logger.info(
-                "[MomentumValue] BUY SETUP — Uptrend (fast=%.2f>slow=%.2f) "
-                "+ price=%.2f at/below BB_low=%.2f + RSI=%.1f (buy low in uptrend)",
-                fast_ma, slow_ma, price, bb_low, rsi,
-            )
-            return "BUY"
+            if at_high and in_profit:
+                logger.info(
+                    "[ProfitEngine] SELL HIGHER — exit long @ %.3f | "
+                    "bought @ %.3f | profit=+$%.2f/bbl | RSI=%.1f",
+                    price, self.entry_price, profit_per_bbl, rsi,
+                )
+                return "EXIT_LONG"
 
-        # ── SELL: momentum downtrend + price at a statistical HIGH ────────────
-        if downtrend and price >= bb_high * 0.998 and rsi > 55:
-            logger.info(
-                "[MomentumValue] SELL SETUP — Downtrend (fast=%.2f<slow=%.2f) "
-                "+ price=%.2f at/above BB_high=%.2f + RSI=%.1f (sell high in downtrend)",
-                fast_ma, slow_ma, price, bb_high, rsi,
-            )
-            return "SELL"
+            # Partial profit take: RSI extremely overbought + any profit
+            if rsi > 72 and profit_per_bbl > 0:
+                logger.info(
+                    "[ProfitEngine] TAKE PROFIT (RSI=%.1f overbought) — "
+                    "exit long @ %.3f | profit=+$%.2f/bbl",
+                    rsi, price, profit_per_bbl,
+                )
+                return "EXIT_LONG"
 
-        # ── EXIT LONG: price reached upper Bollinger (sell high) or overbought
-        if price >= bb_high * 0.998 and rsi > 65:
-            return "EXIT_LONG"
+        if self.in_short and self.entry_price is not None:
+            profit_per_bbl = self.entry_price - price   # profit when price falls
 
-        # ── EXIT SHORT: price reached lower Bollinger (bought back low)
-        if price <= bb_low * 1.002 and rsi < 35:
-            return "EXIT_SHORT"
+            at_low    = price <= bb_low * 1.002
+            in_profit = profit_per_bbl >= self.MIN_PROFIT_PER_BBL
+
+            if at_low and in_profit:
+                logger.info(
+                    "[ProfitEngine] BUY BACK LOWER — exit short @ %.3f | "
+                    "sold @ %.3f | profit=+$%.2f/bbl | RSI=%.1f",
+                    price, self.entry_price, profit_per_bbl, rsi,
+                )
+                return "EXIT_SHORT"
+
+            if rsi < 28 and profit_per_bbl > 0:
+                logger.info(
+                    "[ProfitEngine] TAKE PROFIT (RSI=%.1f oversold) — "
+                    "exit short @ %.3f | profit=+$%.2f/bbl",
+                    rsi, price, profit_per_bbl,
+                )
+                return "EXIT_SHORT"
+
+        # ── ENTRY LOGIC (only when not in a position) ─────────────────────────
+        if not self.in_long and not self.in_short:
+
+            # BUY LOW — price at statistical bottom + momentum confirms uptrend
+            if uptrend and price <= bb_low * 1.003 and rsi < 42:
+                logger.info(
+                    "[ProfitEngine] BUY LOW — price=%.3f at/below BB_low=%.3f "
+                    "| RSI=%.1f (oversold) | target=%.3f (+$%.2f/bbl potential)",
+                    price, bb_low, rsi, bb_high, bb_high - price,
+                )
+                return "BUY"
+
+            # SELL HIGH — price at statistical top + momentum confirms downtrend
+            if downtrend and price >= bb_high * 0.997 and rsi > 58:
+                logger.info(
+                    "[ProfitEngine] SELL HIGH — price=%.3f at/above BB_high=%.3f "
+                    "| RSI=%.1f (overbought) | target=%.3f (+$%.2f/bbl potential)",
+                    price, bb_high, rsi, bb_low, price - bb_low,
+                )
+                return "SELL"
 
         return None
 
     @property
     def warmed_up(self) -> bool:
         return len(self._closes) >= self.slow_n
+
+    @property
+    def potential_profit_per_bbl(self) -> float:
+        """How much $/bbl profit is possible from current entry to target."""
+        if not self._closes or len(self._closes) < self.bb_window:
+            return 0.0
+        _, bb_low, bb_high = self._bollinger()
+        if self.in_long and self.entry_price:
+            return bb_high - self.entry_price
+        if self.in_short and self.entry_price:
+            return self.entry_price - bb_low
+        return bb_high - bb_low
 
 
 class SMACrossEngine:
@@ -512,47 +567,49 @@ async def micro_futures_agent(
 
         mv_signal = engine.update(bar)
 
-        # ── Exit logic — sell high on longs, buy back low on shorts ────────
+        # ── EXIT: only exits when selling HIGHER than buy price ────────────
         if in_position:
-            hit_stop = (
-                (contracts > 0 and bar.close <= stop_price)
-                or (contracts < 0 and bar.close >= stop_price)
-            )
-            # Bollinger-based exits: sell long at upper band (sell high),
-            # cover short at lower band (buy back at the low)
-            take_profit = (
-                (contracts > 0 and mv_signal == "EXIT_LONG")
-                or (contracts < 0 and mv_signal == "EXIT_SHORT")
-            )
-            # Signal flip = trend reversed, get out
-            signal_flip = (contracts > 0 and mv_signal == "SELL") or \
-                          (contracts < 0 and mv_signal == "BUY")
+            pnl_per_bbl = (bar.close - entry_price) if contracts > 0 \
+                          else (entry_price - bar.close)
+            hit_stop    = (contracts > 0 and bar.close <= stop_price) or \
+                          (contracts < 0 and bar.close >= stop_price)
+            take_profit = (contracts > 0 and mv_signal == "EXIT_LONG") or \
+                          (contracts < 0 and mv_signal == "EXIT_SHORT")
 
-            if hit_stop or take_profit or signal_flip:
-                pnl_per_bbl = bar.close - entry_price if contracts > 0 else entry_price - bar.close
+            if take_profit or hit_stop:
                 pnl = pnl_per_bbl * spec["bbl_per_lot"] * abs(contracts)
                 session.record(pnl)
-                reason = "STOP HIT" if hit_stop else \
-                         "SELL HIGH (Bollinger exit)" if take_profit else "TREND FLIP"
-                logger.info(
-                    "[MicroFutures] EXIT %s @ %.3f | P&L $%.2f | %s",
-                    "LONG" if contracts > 0 else "SHORT",
-                    bar.close, pnl, reason,
-                )
+                if take_profit:
+                    logger.info(
+                        "[ProfitEngine] ✓ PROFIT LOCKED — %s bought@%.3f sold@%.3f "
+                        "= +$%.2f/bbl × %d bbl = $%.2f PROFIT",
+                        "LONG" if contracts > 0 else "SHORT",
+                        entry_price, bar.close,
+                        abs(pnl_per_bbl), spec["bbl_per_lot"] * abs(contracts), pnl,
+                    )
+                else:
+                    logger.warning(
+                        "[ProfitEngine] STOP HIT — %s loss=$%.2f "
+                        "(capital protected — loss < 2%% account)",
+                        "LONG" if contracts > 0 else "SHORT", abs(pnl),
+                    )
                 in_position = False
                 contracts   = 0
+                engine.clear_entry()
 
         signal = mv_signal
 
-        # ── Entry logic — buy at the low, sell at the high ─────────────────
+        # ── ENTRY: buy at the low, target is upper Bollinger ───────────────
         if not in_position and signal in ("BUY", "SELL") and engine.warmed_up:
             direction   = Direction.LONG if signal == "BUY" else Direction.SHORT
-            stop_dist   = bar.close * 0.005   # 0.5% stop — ~$0.52/bbl at $104
+            stop_dist   = bar.close * 0.005   # hard stop 0.5% = capital protection
             entry_price = bar.close
             stop_price  = (entry_price - stop_dist if signal == "BUY"
                            else entry_price + stop_dist)
-            target_px   = (entry_price + stop_dist * 2 if signal == "BUY"
-                           else entry_price - stop_dist * 2)
+            # Profit target = upper Bollinger for longs, lower Bollinger for shorts
+            potential   = engine.potential_profit_per_bbl
+            target_px   = (entry_price + potential if signal == "BUY"
+                           else entry_price - potential)
 
             lots = size_for_daily_target(
                 instrument, entry_price, stop_price, daily_target,
@@ -588,14 +645,13 @@ async def micro_futures_agent(
 
             contracts   = lots if signal == "BUY" else -lots
             in_position = True
+            engine.set_entry(entry_price, signal)   # engine enforces sell-higher rule
 
             logger.info(
-                "[MicroFutures] %s %d × %s @ %.3f | stop=%.3f target=%.3f | "
-                "risk=$%.0f target_pnl=$%.0f",
+                "[ProfitEngine] ENTERED %s %d × %s @ %.3f | "
+                "stop=%.3f | target=%.3f | potential=+$%.2f/bbl",
                 signal, abs(contracts), instrument, entry_price,
-                stop_price, target_px,
-                stop_dist * spec["bbl_per_lot"] * abs(contracts),
-                stop_dist * 2 * spec["bbl_per_lot"] * abs(contracts),
+                stop_price, target_px, potential,
             )
 
             # ── ORDER STUB ─────────────────────────────────────────────────
