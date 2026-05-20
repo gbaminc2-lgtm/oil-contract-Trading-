@@ -112,6 +112,35 @@ log P(O_{d+1}) = lse_j[ log_trans[j] + log b_j(O_{d+1}) ]  ← O(N) per candidat
 | `autonomous_agent.py` | `--status` shows MAP prediction; `risk_monitor` logs MAP |
 | `global_ecosystem.py` | ClaudeLeadershipAgent prompt includes MAP direction |
 
+### Fallon Likelihood-Similarity Predictor (Fallon, UMass Lowell, 2012)
+
+A third, independent D=1 HMM runs to generate a BUY/SKIP trading signal via nearest-neighbor likelihood matching.
+
+| Concept | Implementation |
+|---------|---------------|
+| Paper | "Making Profit in the Stock Market Using HMMs," UMass Lowell (2012) |
+| Feature D=1 | close-to-close fractional return (approximates Fallon's (close−open)/open) |
+| States N=4 | HIGH_INCREASE, LOW_INCREASE, LOW_DECREASE, HIGH_DECREASE |
+| Algorithm | Rolling 20-day log P(window\|λ) → find nearest historical day → use its next-day return |
+| Signal | BUY if predicted_return > 0; SKIP if ≤ 0 |
+| Cache | Separate `_fallon_hmm_model`, retrains every `_RETRAIN_EVERY=63` bars |
+| Validation | Fallon achieved 26%+ profit over 1 year on 10 stocks using this method |
+
+**`RegimeResult` Fallon fields** (added with defaults — backward compatible):
+- `fallon_direction`        — "BUY" | "SKIP"
+- `fallon_predicted_return` — nearest-neighbour next-day return prediction
+- `fallon_explanation`      — formatted string with logL and Fallon attribution
+
+**Integration — Fallon signal used in**:
+
+| File | Usage |
+|------|-------|
+| `signal_engine.py` | +0.03 alignment bonus on ensemble score when Fallon=BUY and ensemble>0 |
+| `vsa_agents.py` | Agent 1 logs `fallon_signal` alongside HMM and MAP |
+| `crew_agent.py` | `fetch_hmm_regime_context()` includes Fallon fields |
+| `autonomous_agent.py` | `--status` shows Fallon signal; `risk_monitor` logs it |
+| `global_ecosystem.py` | ClaudeLeadershipAgent prompt includes Fallon direction |
+
 ### HMM Constraints for Claude Code
 
 #### NEVER DO:
@@ -121,11 +150,12 @@ log P(O_{d+1}) = lse_j[ log_trans[j] + log b_j(O_{d+1}) ]  ← O(N) per candidat
 - Bypass the `_HMM` guard — all 5 integration files have graceful fallback to MA heuristic
 - Change the MAP grid dimensions (50×10×10) without re-validating direction thresholds
 - Merge the OHLC HMM (`_ohlc_hmm_model`) with the regime HMM — they have different D
+- Merge the Fallon HMM (`_fallon_hmm_model`) with either other model — D=1 vs D=3 vs D=4
 
 #### ALWAYS DO:
 - Keep log-space forward/backward to prevent float underflow on long series
 - Add `1e-6 * np.eye(D)` covariance regularization in M-step (prevents singular Σ)
-- Return `RegimeResult` from `get_hmm_regime()` — callers depend on `.regime`, `.probabilities`, `.explanation`, `.map_direction`, `.map_frac_change`
+- Return `RegimeResult` from `get_hmm_regime()` — callers depend on `.regime`, `.probabilities`, `.explanation`, `.map_direction`, `.map_frac_change`, `.fallon_direction`, `.fallon_predicted_return`
 - Source `regime_size_multiplier()` from `hmm_regime.py` — do not re-implement in other modules
 - Treat `regime_size_multiplier()` as returning `float` — it no longer returns a dict
 

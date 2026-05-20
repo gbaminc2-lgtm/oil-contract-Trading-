@@ -327,6 +327,52 @@ print(result.map_explanation) # "[MAP-HMM] Next-bar prediction: UP ..."
 
 ---
 
+## Fallon Likelihood-Similarity Predictor (`hmm_regime.py`)
+
+Third HMM predictor based on:
+
+> Fallon, *"Making Profit in the Stock Market Using HMMs"*, University of Massachusetts Lowell (2012)  
+> — Achieved **26%+ profit** over one year trading 10 stocks
+
+### Algorithm
+
+**D=1 observation**: daily close-to-close fractional return ≈ (Close − Open) / Open
+
+**4 hidden states**: HIGH_INCREASE | LOW_INCREASE | LOW_DECREASE | HIGH_DECREASE
+
+**Likelihood-similarity nearest-neighbour** (rolling 20-day window):
+```
+1. Compute log P(O_{t−19}...O_t | λ) for every historical day
+2. Find the historical window with the closest log-likelihood to today
+3. Predicted next-day return = actual return that followed that window
+4. BUY if predicted_return > 0 else SKIP
+```
+
+### Integration
+
+| File | Fallon Usage |
+|------|-------------|
+| `signal_engine.py` | +0.03 alignment bonus when Fallon=BUY and ensemble>0 |
+| `vsa_agents.py` | Agent 1 logs `fallon_signal` every 15 min |
+| `crew_agent.py` | `fetch_hmm_regime_context()` includes Fallon fields |
+| `autonomous_agent.py` | `--status` shows Fallon signal; `risk_monitor` logs it |
+| `global_ecosystem.py` | ClaudeLeadershipAgent prompt enriched with Fallon direction |
+
+### Quick Usage
+
+```python
+from hmm_regime import get_hmm_regime
+
+result = get_hmm_regime("CL=F")
+
+# Fallon likelihood-similarity signal
+print(result.fallon_direction)        # "BUY"
+print(result.fallon_predicted_return) # +0.0083
+print(result.fallon_explanation)      # "[Fallon-HMM] BUY | pred_return=+0.0083 ..."
+```
+
+---
+
 ### Why HMM Beats Simple Moving Averages
 
 1. **Regime persistence** — the transition matrix A captures that markets don't jump between states instantly

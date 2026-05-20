@@ -475,6 +475,8 @@ class ClaudeLeadershipAgent:
                         f"size_mult={hmm_mult:.2f} | "
                         f"MAP_direction={hmm_result.map_direction} "
                         f"MAP_fracChange={hmm_result.map_frac_change:+.4f} | "
+                        f"Fallon={hmm_result.fallon_direction} "
+                        f"Fallon_ret={hmm_result.fallon_predicted_return:+.4f} | "
                         f"{hmm_result.explanation}"
                     )
                     logger.info("[Leadership|HMM] %s", hmm_ctx_str)

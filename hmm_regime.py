@@ -52,6 +52,10 @@ Sources:
     MAP next-bar prediction: Ô_{d+1} = argmax_O P(O₁,...,O_d,O|λ)
     D=3 OHLC fractional features: fracChange=(C-O)/O, fracHigh=(H-O)/O, fracLow=(O-L)/O
     5000-point vectorised grid search: fracChange∈[-0.05,0.05]×50, fracHigh/Low∈[0,0.04]×10
+  Fallon, "Making Profit in the Stock Market Using HMMs" (UMass Lowell, 2012)
+    Likelihood-similarity trading: log P(window|λ) → nearest historical day → next return
+    D=1 HMM: 4 states (HIGH_INCREASE, LOW_INCREASE, LOW_DECREASE, HIGH_DECREASE)
+    BUY if predicted_return > 0; SKIP if ≤ 0; 20-day rolling window; 26%+ profit on stocks
 """
 
 from __future__ import annotations
@@ -127,6 +131,10 @@ class RegimeResult:
     map_direction:   str   = "FLAT"
     map_frac_change: float = 0.0
     map_explanation: str   = "MAP prediction unavailable"
+    # Fallon likelihood-similarity prediction (Fallon, UMass Lowell, 2012)
+    fallon_direction:        str   = "SKIP"
+    fallon_predicted_return: float = 0.0
+    fallon_explanation:      str   = "Fallon prediction unavailable"
 
 
 # ============================================================================
@@ -538,6 +546,10 @@ _RETRAIN_EVERY   = 63   # retrain every quarter (~63 trading days)
 _ohlc_hmm_model:     Optional[OilMarketHMM] = None
 _ohlc_hmm_bar_count: int = 0
 
+# Fallon D=1 HMM cache (Fallon, UMass Lowell 2012) — likelihood-similarity predictor
+_fallon_hmm_model:     Optional[OilMarketHMM] = None
+_fallon_hmm_bar_count: int = 0
+
 
 def get_hmm_regime(ticker:   str = "CL=F",
                    close:    Optional["pd.Series"] = None,
@@ -636,16 +648,22 @@ def get_hmm_regime(ticker:   str = "CL=F",
     # 7. MAP next-bar prediction (Gupta & Dhingra, IEEE 2012)
     map_direction, map_frac_change, map_expl = _run_map_prediction(ticker, retrain)
 
+    # 8. Fallon likelihood-similarity prediction (Fallon, UMass Lowell, 2012)
+    fallon_dir, fallon_ret, fallon_expl = _run_fallon_prediction(close, retrain)
+
     return RegimeResult(
-        regime          = regime,
-        probabilities   = probs,
-        log_likelihood  = model._last_ll,
-        n_iter          = model._last_iter,
-        trained_on_bars = model._n_obs,
-        explanation     = explanation,
-        map_direction   = map_direction,
-        map_frac_change = map_frac_change,
-        map_explanation = map_expl,
+        regime                  = regime,
+        probabilities           = probs,
+        log_likelihood          = model._last_ll,
+        n_iter                  = model._last_iter,
+        trained_on_bars         = model._n_obs,
+        explanation             = explanation,
+        map_direction           = map_direction,
+        map_frac_change         = map_frac_change,
+        map_explanation         = map_expl,
+        fallon_direction        = fallon_dir,
+        fallon_predicted_return = fallon_ret,
+        fallon_explanation      = fallon_expl,
     )
 
 
@@ -687,6 +705,150 @@ def _run_map_prediction(ticker: str, retrain: bool) -> Tuple[str, float, str]:
     except Exception as e:
         logger.warning("[MAP-HMM] Prediction failed: %s", e)
         return "FLAT", 0.0, f"[MAP] Error: {e}"
+
+
+# ── Fallon (UMass Lowell, 2012) — likelihood-similarity predictor ─────────────
+
+def build_fallon_features(close: "pd.Series") -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Fallon (UMass Lowell, 2012) D=1 observation matrix.
+
+    Fallon used (close − open) / open; we approximate with daily close-to-close
+    fractional returns since intraday open/close are not available in the
+    regime pipeline.  Behaviour is economically equivalent for a daily model.
+
+    Returns:
+        X_1d:         (T, 1) float array — observation matrix for the D=1 HMM
+        frac_changes: (T,)   float array — raw fractional returns (aligned)
+    """
+    if not _PD:
+        raise ImportError("pandas required for build_fallon_features")
+    fc = pd.Series(close).astype(float).dropna().pct_change().dropna()
+    return fc.values.reshape(-1, 1), fc.values
+
+
+def _make_fallon_hmm() -> "OilMarketHMM":
+    """
+    Factory for the D=1 Fallon HMM (UMass Lowell, 2012).
+    4 states mirror Fallon's categorisation:
+      HIGH_INCREASE, LOW_INCREASE, LOW_DECREASE, HIGH_DECREASE
+    mapped onto our BULL / SIDEWAYS / SIDEWAYS / BEAR labelling.
+    """
+    hmm = OilMarketHMM(n_states=4, n_features=1)
+    hmm.params.mu = np.array([
+        [ 0.020],   # HIGH_INCREASE → BULL
+        [ 0.005],   # LOW_INCREASE  → mild bull
+        [-0.005],   # LOW_DECREASE  → mild bear
+        [-0.020],   # HIGH_DECREASE → BEAR
+    ])
+    scales = np.array([
+        [0.015**2],
+        [0.008**2],
+        [0.008**2],
+        [0.015**2],
+    ])
+    sigma = np.zeros((4, 1, 1))
+    for i in range(4):
+        sigma[i] = np.diag(scales[i])
+    hmm.params.sigma = sigma
+    return hmm
+
+
+def fallon_predict_next_move(model: "OilMarketHMM",
+                             X_1d: np.ndarray,
+                             frac_changes: np.ndarray,
+                             latency: int = 20) -> Tuple[str, float, float]:
+    """
+    Fallon likelihood-similarity trading signal (Fallon, UMass Lowell, 2012).
+
+    Algorithm:
+    1. Compute log P(O_{t-L+1}...O_t | λ) for every rolling window in history
+    2. Find the historical window whose log-likelihood is closest to today's
+    3. Predicted next-day return = actual return that followed that window
+    4. BUY if predicted_return > 0; SKIP if ≤ 0
+
+    Args:
+        model:        trained D=1 OilMarketHMM
+        X_1d:         (T, 1) observation matrix
+        frac_changes: (T,)   raw fractional returns aligned with X_1d
+        latency:      rolling window length (default 20 ≈ 1 trading month)
+
+    Returns:
+        (direction, predicted_return, current_log_likelihood)
+        direction: "BUY" | "SKIP"
+    """
+    T = len(X_1d)
+    if T < latency + 2:
+        return "SKIP", 0.0, -np.inf
+
+    # Compute rolling log-likelihood for every window ending at t
+    window_lls = np.empty(T - latency)
+    for t in range(latency, T):
+        window = X_1d[t - latency: t]   # (latency, 1)
+        log_B  = model._log_emission(window)
+        _, ll  = model._forward(window, log_B)
+        window_lls[t - latency] = ll
+
+    current_ll = window_lls[-1]
+
+    # Historical windows (all except the current one — we need a known next return)
+    n_hist = len(window_lls) - 1
+    if n_hist == 0:
+        return "SKIP", 0.0, current_ll
+
+    hist_lls    = window_lls[:n_hist]
+    # window ending at (latency + i) has next-day return at index (latency + i)
+    next_returns = frac_changes[latency: latency + n_hist]
+
+    min_len      = min(len(hist_lls), len(next_returns))
+    nearest_idx  = int(np.argmin(np.abs(hist_lls[:min_len] - current_ll)))
+    pred_return  = float(next_returns[nearest_idx])
+
+    direction = "BUY" if pred_return > 0.0 else "SKIP"
+    return direction, pred_return, current_ll
+
+
+def _run_fallon_prediction(close: "pd.Series",
+                           retrain: bool) -> Tuple[str, float, str]:
+    """
+    Run the Fallon D=1 HMM + likelihood-similarity pipeline.
+    Returns (direction, predicted_return, explanation).
+    Isolated so get_hmm_regime() stays readable.
+    """
+    global _fallon_hmm_model, _fallon_hmm_bar_count
+    try:
+        if not _PD or close is None or len(close) < 30:
+            return "SKIP", 0.0, "[Fallon] Insufficient data."
+        X_1d, frac_changes = build_fallon_features(close)
+        if len(X_1d) < 25:
+            return "SKIP", 0.0, "[Fallon] Too few observations."
+
+        needs_fallon_train = (
+            _fallon_hmm_model is None
+            or retrain
+            or (len(X_1d) - _fallon_hmm_bar_count) >= _RETRAIN_EVERY
+        )
+        if needs_fallon_train:
+            logger.info("[Fallon-HMM] Training D=1 HMM on %d bars ...", len(X_1d))
+            fallon_model = _make_fallon_hmm()
+            fallon_model.fit(X_1d)
+            _fallon_hmm_model     = fallon_model
+            _fallon_hmm_bar_count = len(X_1d)
+        else:
+            fallon_model = _fallon_hmm_model
+
+        direction, pred_return, curr_ll = fallon_predict_next_move(
+            fallon_model, X_1d, frac_changes
+        )
+        expl = (
+            f"[Fallon-HMM] {direction} | "
+            f"pred_return={pred_return:+.4f} logL={curr_ll:.2f} "
+            f"— Fallon, UMass Lowell (2012)"
+        )
+        return direction, pred_return, expl
+    except Exception as e:
+        logger.warning("[Fallon-HMM] Prediction failed: %s", e)
+        return "SKIP", 0.0, f"[Fallon] Error: {e}"
 
 
 # ============================================================================
@@ -899,8 +1061,8 @@ if __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
     print("=" * 70)
-    print("  OIL MARKET HMM — Baum-Welch Regime Detector + MAP Predictor")
-    print("  ECE 417 / Gupta & Dhingra (IEEE 2012) → WTI Application")
+    print("  OIL MARKET HMM — Baum-Welch + MAP + Fallon Predictor Suite")
+    print("  ECE 417 / Gupta & Dhingra (IEEE 2012) / Fallon (UMass 2012)")
     print("=" * 70)
 
     result = get_hmm_regime("CL=F")
@@ -908,12 +1070,16 @@ if __name__ == "__main__":
     print()
     print(result.map_explanation)
     print()
+    print(result.fallon_explanation)
+    print()
 
     mult = regime_size_multiplier(result)
     p    = result.probabilities.get(result.regime.value, 0)
     print(
-        f"Regime:        {result.regime.value}  ({p*100:.1f}% confidence)\n"
-        f"MAP direction: {result.map_direction}  "
+        f"Regime:             {result.regime.value}  ({p*100:.1f}% confidence)\n"
+        f"MAP direction:      {result.map_direction}  "
         f"(fracChange={result.map_frac_change:+.4f})\n"
-        f"Size mult:     {mult:.2f}x"
+        f"Fallon signal:      {result.fallon_direction}  "
+        f"(pred_return={result.fallon_predicted_return:+.4f})\n"
+        f"Size mult:          {mult:.2f}x"
     )

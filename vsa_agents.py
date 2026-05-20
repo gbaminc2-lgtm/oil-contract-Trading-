@@ -166,6 +166,7 @@ class SharedMarketState:
     account_balance: float           = field(default_factory=lambda: ACCOUNT_EQUITY_USD)
     hmm_size_mult:   float           = 1.0     # HMM regime-based position size scalar
     map_direction:   str             = "FLAT"  # MAP next-bar prediction: UP|DOWN|FLAT
+    fallon_signal:   str             = "SKIP"  # Fallon likelihood-similarity: BUY|SKIP
 
 
 # ============================================================================
@@ -214,6 +215,7 @@ async def macro_trend_agent(state: SharedMarketState,
                         mult   = regime_size_multiplier(result)
                         state.hmm_size_mult  = mult
                         state.map_direction  = result.map_direction
+                        state.fallon_signal  = result.fallon_direction
                         r = result.regime
                         if r == OilRegime.BULL:
                             state.trend_state = "LONG_ONLY"
@@ -223,9 +225,10 @@ async def macro_trend_agent(state: SharedMarketState,
                             state.trend_state = "FLAT"
                         logger.info(
                             "[Agent 1 | Trend] HMM=%s bias=%s size_mult=%.2f "
-                            "MAP=%s(fc=%+.4f) | %s",
+                            "MAP=%s(fc=%+.4f) Fallon=%s(ret=%+.4f) | %s",
                             r.value, state.trend_state, mult,
                             result.map_direction, result.map_frac_change,
+                            result.fallon_direction, result.fallon_predicted_return,
                             result.explanation,
                         )
                         hmm_resolved = True

@@ -589,6 +589,8 @@ def fetch_hmm_regime_context(ticker: str = "CL=F") -> str:
             f"Kelly_size_mult={mult:.2f} | "
             f"MAP_direction={result.map_direction} "
             f"MAP_fracChange={result.map_frac_change:+.4f} | "
+            f"Fallon={result.fallon_direction} "
+            f"Fallon_ret={result.fallon_predicted_return:+.4f} | "
             f"{result.explanation}"
         )
     except Exception as e:
