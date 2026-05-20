@@ -57,13 +57,41 @@ logger.remove()
 logger.add(sys.stderr, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> [<level>{level:<8}</level>] CrewAgent | {message}", level="INFO")
 
 # ── Risk engine (single source of truth) ─────────────────────────────────────
+# Initialise all optional symbols to None so Pylance never sees them as
+# "possibly unbound".  Each try-block overwrites them if the package exists.
+evaluate_trade:   Any = None
+ApprovalStatus:   Any = None
+TradeSignal:      Any = None
+StrategyType:     Any = None
+Direction:        Any = None
+VolRegime:        Any = None
+MarketRegime:     Any = None
+black76:          Any = None
+OptionRight:      Any = None
+Agent:            Any = None
+Crew:             Any = None
+Process:          Any = None
+Task:             Any = None
+ChatAnthropic:    Any = None
+ChatOpenAI:       Any = None
+OpenAIEmbeddings: Any = None
+Chroma:           Any = None
+PdfReader:        Any = None
+AlpacaREST:       Any = None
+TimeFrame:        Any = None
+feedparser:       Any = None
+_req:             Any = None
+_si:              Any = None
+
 try:
     from risk_engine import (
         ACCOUNT_EQUITY_USD, MAX_RISK_PER_TRADE_PCT,
         MAX_DAILY_LOSS_USD, DAILY_TARGET_USD, MAX_WTI_CONTRACTS,
         evaluate_trade, ApprovalStatus,
     )
-    from strategy_agent import TradeSignal, StrategyType
+    from strategy_agent import (
+        TradeSignal, StrategyType, Direction, VolRegime, MarketRegime,
+    )
     _RISK = True
 except ImportError:
     ACCOUNT_EQUITY_USD     = 500.0
@@ -497,9 +525,9 @@ def fetch_market_regime() -> str:
             "(mild uptrend). UNG 5d: [3.42, 3.38, 3.45, 3.51, 3.48]."
         )
     try:
-        api = AlpacaREST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)
-        uso = api.get_bars("USO", TimeFrame.Day, limit=5).df
-        ung = api.get_bars("UNG", TimeFrame.Day, limit=5).df
+        api = AlpacaREST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)  # type: ignore[arg-type]
+        uso = api.get_bars("USO", TimeFrame.Day, limit=5).df  # type: ignore[union-attr]
+        ung = api.get_bars("UNG", TimeFrame.Day, limit=5).df  # type: ignore[union-attr]
         return (
             f"USO (WTI proxy) 5d closes: {uso['close'].tolist()}\n"
             f"UNG (NatGas proxy) 5d closes: {ung['close'].tolist()}"
@@ -519,13 +547,14 @@ def submit_paper_order(symbol: str, qty: int, side: str) -> Dict[str, Any]:
         logger.info("[Execution] Simulated paper order: %s %d %s", side.upper(), qty, symbol)
         return {"status": "simulated", "symbol": symbol, "qty": qty, "side": side}
     try:
-        api = AlpacaREST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)
+        api = AlpacaREST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)  # type: ignore[arg-type]
         order = api.submit_order(
             symbol=symbol, qty=qty, side=side,
             type="market", time_in_force="day",
         )
-        logger.info("[Execution] Paper order submitted: %s", order.id)
-        return {"status": "submitted", "id": order.id, "symbol": symbol, "qty": qty, "side": side}
+        order_id = getattr(order, "id", "unknown") if order is not None else "unknown"
+        logger.info("[Execution] Paper order submitted: %s", order_id)
+        return {"status": "submitted", "id": order_id, "symbol": symbol, "qty": qty, "side": side}
     except Exception as e:
         logger.error("[Execution] Order error: %s", e)
         return {"status": "error", "error": str(e)}
@@ -537,10 +566,10 @@ def submit_paper_order(symbol: str, qty: int, side: str) -> Dict[str, Any]:
 def _get_llm() -> Any:
     if _LC_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY"):
         logger.info("[LLM] Using Claude Sonnet 4.6 (Anthropic)")
-        return ChatAnthropic(
-            model="claude-sonnet-4-6",
+        return ChatAnthropic(  # type: ignore[call-arg]
+            model_name="claude-sonnet-4-6",
             temperature=0.0,
-            anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
+            api_key=os.environ["ANTHROPIC_API_KEY"],
         )
     if _LC_OPENAI and os.environ.get("OPENAI_API_KEY"):
         logger.info("[LLM] Using GPT-4o (OpenAI fallback)")
@@ -562,7 +591,7 @@ def _build_crew(
     greeks: Dict[str, float],
     uso_price: float,
     ensemble_summary: str = "",
-) -> "Crew":
+) -> Any:
     llm = _get_llm()
 
     # ── Agent 1: Ingestion Officer ────────────────────────────────────────────
@@ -866,12 +895,20 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
         try:
             signal = TradeSignal(
                 ticker="USO",
-                strategy=StrategyType.OPTIONS_HEDGE,
+                strategy=StrategyType.BEAR_PUT_SPREAD,
+                direction=Direction.SHORT,
                 entry_price=uso_price,
-                strike=round(uso_price),
+                target_price=uso_price * 0.95,
+                stop_price=uso_price * 1.02,
+                legs=[{"right": "put", "strike": round(uso_price), "dte": 30, "iv": 0.28}],
+                net_premium=-2.10,
+                max_profit=uso_price * 0.05 - 2.10,
+                max_loss=2.10,
                 dte=30,
-                iv=0.28,
-                contracts=1,
+                confidence=0.55,
+                vol_regime=VolRegime.NORMAL,
+                market_regime=MarketRegime.FLAT,
+                rationale="Bear put spread at statistical high — crew pre-screen gate",
             )
             assessment = evaluate_trade(signal)
             if assessment.status == ApprovalStatus.REJECTED:
