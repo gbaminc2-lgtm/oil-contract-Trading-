@@ -1,0 +1,49 @@
+{
+  "recommendations": [
+    // ── Python core ────────────────────────────────────────────────
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.black-formatter",
+    "ms-python.isort",
+    "ms-python.debugpy",
+
+    // ── Jupyter / notebooks ────────────────────────────────────────
+    "ms-toolsai.jupyter",
+    "ms-toolsai.jupyter-keymap",
+    "ms-toolsai.jupyter-renderers",
+
+    // ── Claude Code ────────────────────────────────────────────────
+    "anthropic.claude-code",
+
+    // ── GitHub integration ─────────────────────────────────────────
+    "github.vscode-pull-request-github",
+    "github.copilot-chat",
+    "eamodio.gitlens",
+
+    // ── Data / CSV / YAML ──────────────────────────────────────────
+    "mechatroner.rainbow-csv",
+    "redhat.vscode-yaml",
+
+    // ── Code quality ───────────────────────────────────────────────
+    "ms-python.mypy-type-checker",
+    "charliermarsh.ruff",
+    "njpwerner.autodocstring",
+
+    // ── Markdown / docs ────────────────────────────────────────────
+    "yzhang.markdown-all-in-one",
+    "davidanson.vscode-markdownlint",
+    "bierner.markdown-mermaid",
+
+    // ── Utilities ──────────────────────────────────────────────────
+    "gruntfuggly.todo-tree",
+    "usernamehw.errorlens",
+    "oderwat.indent-rainbow",
+    "PKief.material-icon-theme",
+    "streetsidesoftware.code-spell-checker",
+    "ms-vscode.hexeditor",
+    "formulahendry.code-runner",
+    "christian-kohler.path-intellisense"
+  ],
+
+  "unwantedRecommendations": []
+}

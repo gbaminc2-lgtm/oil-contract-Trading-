@@ -1,0 +1,124 @@
+# ── Quant Energy Commodity Pipeline — .gitignore ───────────────────────────
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+.env
+env.bak/
+venv.bak/
+
+# ── Testing & coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+.hypothesis/
+nosetests.xml
+test-results.xml
+
+# ── Type checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+*.ipynb
+
+# ── Pipeline outputs & logs ───────────────────────────────────────────────────
+quant_energy_pipeline.log
+trading_pipeline.log
+*.log
+logs/
+output/
+reports/
+*.csv
+*.xlsx
+*.parquet
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+
+# ── Model artifacts (ML trained models) ──────────────────────────────────────
+models/
+*.joblib
+*.model
+saved_models/
+
+# ── NEVER COMMIT: Credentials, API keys, broker configs ──────────────────────
+.env
+.env.local
+.env.*.local
+secrets.json
+credentials.json
+broker_config.json
+api_keys.py
+*.key
+*.pem
+*.pfx
+*.p12
+config/local*.json
+config/prod*.json
+
+# ── OS generated ──────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── Claude Code local settings (personal overrides, not team config) ─────────
+.claude/settings.local.json
+
+# ── IDEs (keep .vscode/ committed for team settings) ─────────────────────────
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ── Documentation builds ──────────────────────────────────────────────────────
+docs/_build/
+docs/api/
+site/
+
+# ── Distribution / packaging ──────────────────────────────────────────────────
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Profiling ─────────────────────────────────────────────────────────────────
+*.prof
+*.lprof
