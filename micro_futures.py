@@ -228,7 +228,7 @@ def size_for_daily_target(
         mam = _get_mam()
         stop_ticks = max(1, int(round(abs(entry - stop) / spec["tick_size"])))
         mam_result = mam.calculate_position_size(
-            account_equity, MAX_RISK_PER_TRADE_PCT, stop_ticks, spec["tick_value"]
+            account_equity, MAX_RISK_PER_TRADE_PCT * 100, stop_ticks, spec["tick_value"]
         )
         mam_lots = int(mam_result.get("max_contracts", lots))
         if mam_lots < lots:

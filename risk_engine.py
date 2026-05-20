@@ -320,7 +320,7 @@ def mam_position_size(
     if not _MAM:
         return 0
     mam = _get_mam()
-    result = mam.calculate_position_size(balance, risk_pct, stop_ticks, tick_value)
+    result = mam.calculate_position_size(balance, risk_pct * 100, stop_ticks, tick_value)
     contracts = int(result.get("max_contracts", 0))
     return min(contracts, MAX_WTI_CONTRACTS)
 

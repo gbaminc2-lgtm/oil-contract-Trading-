@@ -633,7 +633,7 @@ def fetch_market_arch_context() -> str:
 
         # Phase-4: sample sizing at current equity
         size_r = mam.calculate_position_size(
-            ACCOUNT_EQUITY_USD, MAX_RISK_PER_TRADE_PCT,
+            ACCOUNT_EQUITY_USD, MAX_RISK_PER_TRADE_PCT * 100,
             stop_ticks=10, tick_value=tick_val,
         )
         pos_contracts = size_r.get("max_contracts", 0)

@@ -476,7 +476,7 @@ async def quant_risk_agent(
                                                   if "TICK_SIZE_BBL" in VSA_THRESHOLDS else risk_per_bbl / 0.01)))
                     tick_val   = VSA_THRESHOLDS.get("TICK_VALUE_USD", 1.00)
                     mam_r      = mam.calculate_position_size(
-                        state.account_balance, MAX_RISK_PER_TRADE_PCT,
+                        state.account_balance, MAX_RISK_PER_TRADE_PCT * 100,
                         stop_ticks, tick_val,
                     )
                     mam_lots = mam_r.get("max_contracts", position_lots)

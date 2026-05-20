@@ -154,7 +154,7 @@ class MarketArchitectureMath:
         Microwave travels at ≈c through air; fiber at c/n_fiber (n≈1.5) due to
         total internal reflection — microwave is ~33% faster over the same distance.
 
-        HFT context: at NYC→CME (1 180 km), microwave saves ~2.62 μs one-way.
+        HFT context: at NYC→CME (1 180 km), microwave saves ~1967 μs one-way.
         A 1 μs advantage allows cancellation of ~1 000 limit orders before
         a competitor's stale quote arrives.
         """
