@@ -54,6 +54,12 @@ try:
 except ImportError:
     _SKL = False
 
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 
 # ============================================================================
 # 1. ENUMERATIONS
@@ -549,35 +555,48 @@ def generate_crack_spread_signal(crack: Optional[CrackSpread] = None) -> TradeSi
     season = fetch_seasonal_pattern(WTI_TICKER)
     current_month = datetime.date.today().month
 
+    # MAM Phase-2 cross-check: recompute 3-2-1 from raw component prices
+    crack_321_ref = crack.crack_321
+    if _MAM:
+        try:
+            mam = _get_mam()
+            crack_321_ref = mam.calculate_crack_spread(
+                crack.crude_price, crack.gasoline_price, crack.heating_oil_price
+            )
+            logger.debug("MAM 3-2-1 crack cross-check: $%.2f vs data_agent $%.2f",
+                         crack_321_ref, crack.crack_321)
+        except Exception:
+            crack_321_ref = crack.crack_321
+
     # Wide crack → sell (short products, long crude)
-    if crack.crack_321 > 15.0:
+    if crack_321_ref > 15.0:
         direction = Direction.SHORT  # short the crack
         strat     = StrategyType.CRACK_SPREAD_SHORT
-        conf      = min(0.65 + (crack.crack_321 - 15) * 0.01, 0.85)
+        conf      = min(0.65 + (crack_321_ref - 15) * 0.01, 0.85)
         rationale = (
-            f"3-2-1 crack wide at ${crack.crack_321:.2f}/bbl (>$15). "
+            f"3-2-1 crack wide at ${crack_321_ref:.2f}/bbl (>$15). "
             f"Sell crack: short {WTI_BBL_PER_CONTRACT} bbl RBOB/ULSD, long {WTI_BBL_PER_CONTRACT} bbl WTI. "
             f"Seasonal factor (month {current_month}): {season.get(current_month):.3f}"
         )
-        target = crack.crack_321 - 5.0
-        stop   = crack.crack_321 + 3.0
+        target = crack_321_ref - 5.0
+        stop   = crack_321_ref + 3.0
     else:
         direction = Direction.LONG  # long the crack
         strat     = StrategyType.CRACK_SPREAD_LONG
-        conf      = min(0.55 + (10.0 - crack.crack_321) * 0.01, 0.75)
+        conf      = min(0.55 + (10.0 - crack_321_ref) * 0.01, 0.75)
         rationale = (
-            f"3-2-1 crack compressed at ${crack.crack_321:.2f}/bbl. "
+            f"3-2-1 crack compressed at ${crack_321_ref:.2f}/bbl. "
             f"Buy crack: long RBOB/ULSD, short WTI. "
             f"Seasonal factor (month {current_month}): {season.get(current_month):.3f}"
         )
-        target = crack.crack_321 + 4.0
-        stop   = crack.crack_321 - 2.0
+        target = crack_321_ref + 4.0
+        stop   = crack_321_ref - 2.0
 
     return TradeSignal(
         ticker       = f"{WTI_TICKER}/{RBOB_TICKER}/{ULSD_TICKER}",
         strategy     = strat,
         direction    = direction,
-        entry_price  = crack.crack_321,
+        entry_price  = crack_321_ref,
         target_price = target,
         stop_price   = stop,
         legs         = [

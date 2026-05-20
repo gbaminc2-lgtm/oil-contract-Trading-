@@ -63,6 +63,12 @@ try:
 except ImportError:
     _BT = False
 
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 # ── Internal risk & strategy imports ─────────────────────────────────────────
 try:
     from risk_engine import (
@@ -216,6 +222,19 @@ def size_for_daily_target(
     max_allowed   = min(max_by_risk, max_by_margin, MAX_WTI_CONTRACTS * 10)
 
     lots = min(contracts_for_target, max_allowed)
+
+    # MAM Phase-4 cross-check (Market Architecture Math)
+    if _MAM:
+        mam = _get_mam()
+        stop_ticks = max(1, int(round(abs(entry - stop) / spec["tick_size"])))
+        mam_result = mam.calculate_position_size(
+            account_equity, MAX_RISK_PER_TRADE_PCT, stop_ticks, spec["tick_value"]
+        )
+        mam_lots = int(mam_result.get("max_contracts", lots))
+        if mam_lots < lots:
+            logger.info("[Sizer] MAM Phase-4 cross-check reduced %d→%d lots", lots, mam_lots)
+            lots = mam_lots
+
     logger.info(
         "[Sizer] %s: risk/lot=$%.0f target_lots=%d max_lots=%d → %d lots",
         instrument, risk_per_contract,

@@ -34,6 +34,12 @@ import pandas as pd
 
 from strategy_agent import Greeks as BSMResult, TradeSignal, Direction, StrategyType
 
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -297,6 +303,26 @@ def wti_lot_size(
         dollar_risk, risk_per_lot, lots, MAX_WTI_CONTRACTS,
     )
     return max(lots, 0)
+
+
+def mam_position_size(
+    balance: float,
+    risk_pct: float,
+    stop_ticks: int,
+    tick_value: float,
+) -> int:
+    """
+    Cross-check position size via MarketArchitectureMath Phase-4 formula.
+
+    MAM formula: contracts = floor((balance × risk_pct) / (stop_ticks × tick_value))
+    Capped at MAX_WTI_CONTRACTS. Returns 0 when MAM unavailable.
+    """
+    if not _MAM:
+        return 0
+    mam = _get_mam()
+    result = mam.calculate_position_size(balance, risk_pct, stop_ticks, tick_value)
+    contracts = int(result.get("max_contracts", 0))
+    return min(contracts, MAX_WTI_CONTRACTS)
 
 
 # ============================================================================

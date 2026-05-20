@@ -145,6 +145,12 @@ try:
 except ImportError:
     _HMM = False
 
+try:
+    from market_architecture import get_market_arch as _get_mam_eco
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 logging.basicConfig(
     level  = logging.INFO,
     format = "%(asctime)s [%(levelname)-8s] %(name)-24s | %(message)s",
@@ -485,6 +491,27 @@ class ClaudeLeadershipAgent:
 
         raw_context["hmm_regime"] = hmm_ctx_str
 
+        # ── Market Architecture Math Phase-1 latency context ─────────────────
+        mam_ctx_str = "MAM unavailable"
+        if _MAM:
+            try:
+                mam_eco    = _get_mam_eco()
+                latencies  = mam_eco.all_exchange_latencies()
+                nyc_chi    = latencies.get("NYC_CHICAGO", {})
+                chi_lon    = latencies.get("CHICAGO_LONDON", {})
+                mam_ctx_str = (
+                    f"NYC→CME microwave={nyc_chi.get('microwave_microseconds',0):.0f}µs "
+                    f"fiber={nyc_chi.get('fiber_microseconds',0):.0f}µs "
+                    f"adv={nyc_chi.get('advantage_microseconds',0):.0f}µs | "
+                    f"CME→ICE microwave={chi_lon.get('microwave_microseconds',0):.0f}µs "
+                    f"fiber={chi_lon.get('fiber_microseconds',0):.0f}µs "
+                    f"adv={chi_lon.get('advantage_microseconds',0):.0f}µs"
+                )
+                logger.info("[Leadership|MAM] %s", mam_ctx_str)
+            except Exception as mam_exc:
+                logger.debug("[Leadership|MAM] Skipped: %s", mam_exc)
+        raw_context["exchange_latency"] = mam_ctx_str
+
         if self.client is None:
             # Offline fallback — infer bias from HMM state
             if global_memory.hmm_regime == "BULL":
@@ -512,7 +539,9 @@ class ClaudeLeadershipAgent:
                     "You are Chief Global Energy Fund Overseer. "
                     "A Baum-Welch Hidden Markov Model has pre-classified the WTI market regime. "
                     "Use the HMM state and posteriors to anchor your bias, then refine with "
-                    "macro context. Call shift_ecosystem_regime to set the current regime bias."
+                    "macro context. Exchange latency data (microwave vs fiber) is provided in "
+                    "exchange_latency — use it to assess speed-of-information arbitrage context. "
+                    "Call shift_ecosystem_regime to set the current regime bias."
                 ),
                 messages   = [{"role": "user", "content": json.dumps(raw_context)}],
             )

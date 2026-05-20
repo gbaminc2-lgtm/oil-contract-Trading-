@@ -410,6 +410,109 @@ mult = regime_size_multiplier(result)   # 0.87
 
 ---
 
+## Market Architecture Math Engine (`market_architecture.py`)
+
+Pure-Python, zero-dependency quantitative market microstructure calculator.  
+Four phases from raw physics to risk-adjusted position sizing.
+
+### Phase 1 — Latency Engine
+
+Microwave signals travel through free air at ≈ 0.67c; fiber at ≈ 0.45c due to glass refractive index (n ≈ 1.5) and cable routing overhead. The advantage per route:
+
+| Route | Distance | Microwave | Fiber | Advantage |
+|-------|---------|----------|-------|----------|
+| NYC → CME/NYMEX | 1 180 km | ~3 924 µs | ~5 886 µs | **~1 962 µs** |
+| CME → ICE London | 7 500 km | ~24 938 µs | ~37 407 µs | **~12 469 µs** |
+| NYC → Cushing Hub | 2 200 km | ~7 320 µs | ~10 980 µs | **~3 660 µs** |
+| London → Frankfurt | 650 km | ~2 163 µs | ~3 244 µs | **~1 082 µs** |
+
+A 1 µs advantage allows cancellation of ~1 000 stale limit orders before a competitor's quote arrives.
+
+### Phase 2 — Contract Notional & 3:2:1 Crack Spread
+
+```
+Notional = price × multiplier × contracts
+Tick value = tick_size × multiplier
+
+3:2:1 Crack spread ($/bbl) = (2 × RBOB_gal×42 + HO_gal×42 − 3 × crude) / 3
+```
+
+| Symbol | Multiplier | Tick Size | Tick Value |
+|--------|-----------|----------|----------|
+| CL (WTI) | 1 000 bbl | $0.01/bbl | $10.00 |
+| MCL (Micro) | 100 bbl | $0.01/bbl | $1.00 |
+| BRN (Brent) | 1 000 bbl | $0.01/bbl | $10.00 |
+| RB (RBOB) | 42 000 gal | $0.0001/gal | $4.20 |
+| HO (ULSD) | 42 000 gal | $0.0001/gal | $4.20 |
+
+### Phase 3 — Black-Scholes (EQUITY ONLY)
+
+> ⚠️ **Phase 3 is for equity options only.** WTI / Brent / RBOB / ULSD options **must** use `black76()` from `strategy_agent.py`.
+
+```python
+d1 = (ln(S/K) + (r + σ²/2)·T) / (σ√T)
+d2 = d1 − σ√T
+C  = S·N(d1) − K·e^(−rT)·N(d2)
+Δ  = N(d1)   |   Γ = N'(d1)/(S·σ·√T)   |   Θ = −(S·N'(d1)·σ)/(2√T) − r·K·e^(−rT)·N(d2)
+```
+
+### Phase 4 — Position Sizing & Parametric VaR
+
+```
+max_loss          = balance × risk_pct / 100
+risk_per_contract = stop_ticks × tick_value
+max_contracts     = floor(max_loss / risk_per_contract)
+
+VaR(confidence, T) = portfolio × (μ·T + z·σ·√T)
+  z: 95% → 1.645 | 99% → 2.326
+```
+
+### Integration
+
+```
+market_architecture.py
+  ├── data_agent.py        → fetch_exchange_latency()           (Phase 1)
+  ├── risk_engine.py       → mam_position_size()                (Phase 4)
+  ├── micro_futures.py     → size_for_daily_target() cross-check (Phase 4)
+  ├── strategy_agent.py    → generate_crack_spread_signal()     (Phase 2)
+  ├── vsa_agents.py        → Agent 4 position sizing cross-check (Phase 4)
+  ├── autonomous_agent.py  → --status latency table             (Phase 1)
+  ├── crew_agent.py        → fetch_market_arch_context()        (Phase 1+2+4)
+  ├── global_ecosystem.py  → ClaudeLeadershipAgent exchange_latency (Phase 1)
+  └── main.py              → --market-arch demo                 (all phases)
+```
+
+### Quick Usage
+
+```python
+from market_architecture import get_market_arch
+
+mam = get_market_arch()   # module singleton
+
+# Phase 1 — latency
+lat = mam.all_exchange_latencies()["NYC_CHICAGO"]
+print(f"Microwave: {lat['microwave_microseconds']:.1f}µs  "
+      f"Fiber: {lat['fiber_microseconds']:.1f}µs  "
+      f"Advantage: {lat['advantage_microseconds']:.1f}µs")
+
+# Phase 2 — crack spread
+crack_321 = mam.calculate_crack_spread(crude_price=75.0, gasoline_price=2.10, heating_oil_price=2.50)
+
+# Phase 4 — sizing at $500 account
+pos = mam.calculate_position_size(balance=500, risk_pct=2.0, stop_ticks=20, tick_value=1.00)
+print(pos["max_contracts"], pos["max_loss_allowed_usd"])
+
+# Run full demo
+mam.run_demo()
+```
+
+```bash
+# Via main.py
+python main.py --market-arch
+```
+
+---
+
 ## CI/CD Pipeline (GitHub Actions)
 
 | Job | Trigger | Description |

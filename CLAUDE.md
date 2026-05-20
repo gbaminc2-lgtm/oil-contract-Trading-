@@ -7,7 +7,7 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 
 ---
 
-## Architecture — 11-File Split
+## Architecture — 12-File Split
 
 | File | Responsibility | Do Not Modify |
 |------|---------------|---------------|
@@ -22,6 +22,7 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 | `vsa_agents.py` | Async 4-agent VSA team: trend filter, sharpshooter scanner, context/execution, quant risk | `VSA_THRESHOLDS` keys, agent topology |
 | `micro_futures.py` | Micro & E-mini energy futures agent: SMA crossover, $5K/day target, backtrader cerebro backtest | `INSTRUMENTS` specs, daily target constant |
 | `hmm_regime.py` | **Baum-Welch HMM** — 4-state Gaussian HMM (BULL/BEAR/VOLATILE/SIDEWAYS) fitted to WTI features via EM; outputs soft posteriors γ_t(i) for position sizing | Forward/backward math, N=4 states, D=4 features, log-space numerics |
+| `market_architecture.py` | **Market Microstructure Math Engine** — 4-phase: microwave/fiber latency, contract notional/tick, BSM (equity only), 1%-rule position sizing & parametric VaR | `EXCHANGE_ROUTES`, `ALL_CONTRACTS`, `MCL_SPEC` values; Phase 3 is equity only — energy options MUST use `black76()` |
 
 ---
 
@@ -158,6 +159,84 @@ A third, independent D=1 HMM runs to generate a BUY/SKIP trading signal via near
 - Return `RegimeResult` from `get_hmm_regime()` — callers depend on `.regime`, `.probabilities`, `.explanation`, `.map_direction`, `.map_frac_change`, `.fallon_direction`, `.fallon_predicted_return`
 - Source `regime_size_multiplier()` from `hmm_regime.py` — do not re-implement in other modules
 - Treat `regime_size_multiplier()` as returning `float` — it no longer returns a dict
+
+---
+
+## Market Architecture Math Engine (`market_architecture.py`)
+
+### Four-Phase Calculator
+
+| Phase | Function | Purpose |
+|-------|----------|---------|
+| 1 — Latency | `calculate_latency_advantage(distance_km)` | Microwave vs fiber µs advantage per route |
+| 1 — All routes | `all_exchange_latencies()` | Dict of all `EXCHANGE_ROUTES` with computed µs values |
+| 2 — Notional | `calculate_notional_and_tick(price, multiplier, tick_size)` | Contract exposure + $/tick |
+| 2 — Shortcut | `contract_notional(symbol, price, contracts)` | Looks up `ALL_CONTRACTS` by symbol |
+| 2 — Crack | `calculate_crack_spread(crude, gasoline, heating_oil)` | 3:2:1 spread $/bbl |
+| 3 — BSM | `black_scholes_call(S, K, T, r, sigma)` | **EQUITY ONLY** — call price + Greeks |
+| 4 — Sizing | `calculate_position_size(balance, risk_pct, stop_ticks, tick_value)` | 1%-rule max contracts |
+| 4 — VaR | `calculate_parametric_var(portfolio_value, daily_mean, daily_vol, confidence, days)` | Parametric VaR |
+
+### EXCHANGE_ROUTES (Phase 1)
+
+| Key | Route | Distance |
+|-----|-------|---------|
+| `NYC_CHICAGO` | NYSE → CME/NYMEX (WTI CL, S&P ES) | 1 180 km |
+| `CHICAGO_LONDON` | CME → ICE London (Brent BRN, TTF) | 7 500 km |
+| `NYC_HOUSTON` | NYSE → Cushing physical hub | 2 200 km |
+| `LONDON_FRANKFURT` | ICE → Eurex (European equity derivatives) | 650 km |
+
+### ALL_CONTRACTS (Phase 2)
+
+| Symbol | Name | Multiplier | Tick Size |
+|--------|------|-----------|----------|
+| `CL` | WTI Crude Oil | 1 000 bbl | $0.01/bbl |
+| `MCL` | Micro WTI | 100 bbl | $0.01/bbl |
+| `BRN` | Brent Crude | 1 000 bbl | $0.01/bbl |
+| `RB` | RBOB Gasoline | 42 000 gal | $0.0001/gal |
+| `HO` | Heating Oil (ULSD) | 42 000 gal | $0.0001/gal |
+
+### Integration Points
+
+| File | MAM Usage |
+|------|-----------|
+| `data_agent.py` | `fetch_exchange_latency()` calls `all_exchange_latencies()` |
+| `risk_engine.py` | `mam_position_size()` cross-checks sizing via Phase 4 |
+| `micro_futures.py` | `size_for_daily_target()` uses MAM sizing cross-check |
+| `strategy_agent.py` | `generate_crack_spread_signal()` uses `calculate_crack_spread()` as reference |
+| `vsa_agents.py` | Agent 4 uses `calculate_position_size()` as secondary validation |
+| `autonomous_agent.py` | `--status` shows Phase-1 latency table for all routes |
+| `crew_agent.py` | `fetch_market_arch_context()` included in IngestionOfficer + RiskOfficer tasks |
+| `global_ecosystem.py` | `exchange_latency` injected into ClaudeLeadershipAgent context |
+| `main.py` | `--market-arch` flag runs full 4-phase demo |
+
+### Module Singleton
+
+```python
+from market_architecture import get_market_arch
+mam = get_market_arch()   # lazily initialised, shared instance
+
+lat  = mam.all_exchange_latencies()["NYC_CHICAGO"]
+# lat["microwave_microseconds"], lat["fiber_microseconds"], lat["advantage_microseconds"]
+
+pos  = mam.calculate_position_size(500, 2.0, 20, 1.00)
+# pos["max_contracts"], pos["max_loss_allowed_usd"], pos["risk_per_contract_usd"]
+```
+
+### Market Architecture Math Constraints for Claude Code
+
+#### NEVER DO:
+- Use `black_scholes_call()` from `market_architecture.py` for energy options — it is **EQUITY ONLY**
+- Modify `EXCHANGE_ROUTES` distances or `ALL_CONTRACTS` multipliers/tick sizes — sourced from CME/ICE/NYMEX specs
+- Let MAM sizing override the hard `MAX_WTI_CONTRACTS` cap in `risk_engine.py`
+- Use `MCL_SPEC["multiplier"]` (100 bbl) for standard CL contracts — they are separate entries
+
+#### ALWAYS DO:
+- Use `black76()` from `strategy_agent.py` for all WTI/Brent/RBOB/ULSD options pricing
+- Treat MAM position sizing as a **cross-check**, never the primary gate — `evaluate_trade()` is always primary
+- Source account equity from `risk_engine.ACCOUNT_EQUITY_USD`, not from a MAM constant
+- Call `get_market_arch()` (singleton) — never instantiate `MarketArchitectureMath()` directly in integration code
+- Keep `run_demo()` as the only entry point from `main.py --market-arch` — do not call `if __name__ == "__main__"` block from other modules
 
 ---
 

@@ -53,6 +53,12 @@ try:
 except ImportError:
     _SKL = False;  logger.warning("scikit-learn missing. pip install scikit-learn")
 
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 # ============================================================================
 # 1. CONTRACT SPECIFICATIONS  (NYMEX Chapter 200 + ICE Brent + products)
 # ============================================================================
@@ -551,6 +557,25 @@ def fetch_basis(physical_price: Optional[float] = None) -> Dict[str, float]:
         "basis_pct": (phys - futs) / futs * 100 if futs > 0 else 0.0,
         "type": "PREMIUM" if phys > futs else "DISCOUNT" if phys < futs else "FLAT",
     }
+
+
+def fetch_exchange_latency() -> Dict[str, Dict]:
+    """
+    Return microwave-vs-fiber latency advantage for all known exchange routes.
+
+    Market Architecture Math (Phase 1): microwave travels at ~0.67c in free
+    air; fiber at ~0.67c through glass but with routing overhead → net
+    microwave advantage of ~35-40% per route.
+
+    Returns dict keyed by route name with advantage_microseconds,
+    microwave_microseconds, fiber_microseconds, and route metadata.
+    Falls back to empty dict if MAM unavailable.
+    """
+    if not _MAM:
+        logger.debug("market_architecture not available; skipping latency fetch.")
+        return {}
+    mam = _get_mam()
+    return mam.all_exchange_latencies()
 
 
 # ============================================================================

@@ -181,6 +181,13 @@ try:
 except ImportError:
     _HMM = False
 
+# ── Optional: Market Architecture Math ────────────────────────────────────────
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 # =============================================================================
 # SECTION 1 — CONFIGURATION (all values from risk_engine, never hardcoded)
 # =============================================================================
@@ -596,6 +603,51 @@ def fetch_hmm_regime_context(ticker: str = "CL=F") -> str:
     except Exception as e:
         return f"HMM regime fetch error: {e}. Assume SIDEWAYS, size_mult=0.5."
 
+
+def fetch_market_arch_context() -> str:
+    """Return a formatted Market Architecture Math context string for CrewAI agents.
+
+    Covers Phase 1 (latency), Phase 2 (contract notional/tick, 3-2-1 crack),
+    and Phase 4 (position sizing formula). Falls back to static mock if MAM
+    is unavailable.
+    """
+    if not _MAM:
+        return (
+            "MarketArchMath unavailable. "
+            "NYC→CME microwave ~3900µs vs fiber ~5900µs (+2000µs advantage). "
+            "MCL notional ~$7200/contract. 3-2-1 crack: (2×RBOB + HO - 3×WTI) / 3. "
+            "Pos size = floor(equity × risk_pct / (stop_ticks × tick_val))."
+        )
+    try:
+        mam = _get_mam()
+        latencies = mam.all_exchange_latencies()
+        nyc_chi   = latencies.get("NYC_CHICAGO", {})
+        adv_us    = nyc_chi.get("advantage_microseconds", 0)
+        mw_us     = nyc_chi.get("microwave_microseconds", 0)
+        fb_us     = nyc_chi.get("fiber_microseconds", 0)
+
+        # Phase-2 sample: MCL at $72/bbl
+        notional = mam.contract_notional("MCL", 72.0, contracts=1)
+        ntnl_val  = notional.get("notional_value_usd", 0)
+        tick_val  = notional.get("tick_value_usd", 1.0)
+
+        # Phase-4: sample sizing at current equity
+        size_r = mam.calculate_position_size(
+            ACCOUNT_EQUITY_USD, MAX_RISK_PER_TRADE_PCT,
+            stop_ticks=10, tick_value=tick_val,
+        )
+        pos_contracts = size_r.get("max_contracts", 0)
+
+        return (
+            f"MarketArchMath Phase1: NYC→CME microwave={mw_us:.0f}µs "
+            f"fiber={fb_us:.0f}µs advantage={adv_us:.0f}µs | "
+            f"Phase2: MCL@$72 notional=${ntnl_val:,.0f} tick_val=${tick_val:.2f} | "
+            f"Phase4: ${ ACCOUNT_EQUITY_USD:.0f}×{MAX_RISK_PER_TRADE_PCT:.0%}/"
+            f"(10ticks×${tick_val:.2f})={pos_contracts} contracts"
+        )
+    except Exception as e:
+        return f"MarketArchMath context error: {e}."
+
 # =============================================================================
 # SECTION 7 — ALPACA PAPER EXECUTION
 # evaluate_trade() gate MUST pass before this is called.
@@ -653,6 +705,7 @@ def _build_crew(
     uso_price: float,
     ensemble_summary: str = "",
     hmm_regime_ctx: str = "",
+    mam_ctx: str = "",
 ) -> Any:
     llm = _get_llm()
 
@@ -767,6 +820,8 @@ def _build_crew(
             "or a SELL HIGH opportunity RIGHT NOW. Use all data below.\n\n"
             f"**Baum-Welch HMM Market Regime (4-state: BULL/BEAR/VOLATILE/SIDEWAYS):**\n"
             f"{hmm_regime_ctx}\n\n"
+            f"**Market Microstructure (latency/notional/sizing):**\n"
+            f"{mam_ctx}\n\n"
             f"**Multi-Factor Signal Engine Assessment (Bollinger+RSI+Momentum+Carry):**\n"
             f"{ensemble_summary}\n\n"
             f"**EIA Petroleum Storage (live):**\n{live_eia}\n\n"
@@ -827,6 +882,7 @@ def _build_crew(
             "**Greek limits:** Max delta ±20 | Max vega ±$500/1%IV\n"
             "**Min DTE:** 21 days (Bittman constraint)\n\n"
             f"**HMM Regime Context:**\n{hmm_regime_ctx}\n\n"
+            f"**Market Microstructure:**\n{mam_ctx}\n\n"
             "**Checklist:**\n"
             "  [ ] Defined-risk only (no naked shorts) — REJECT immediately if undefined risk\n"
             "  [ ] (Strike width − net premium) × multiplier ≤ max risk/trade\n"
@@ -912,6 +968,10 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
     hmm_regime_ctx = fetch_hmm_regime_context("CL=F")
     logger.info("[CrewAgent] HMM: %s", hmm_regime_ctx[:120])
 
+    # — Market Architecture Math context (Phase 1+2+4)
+    mam_ctx = fetch_market_arch_context()
+    logger.info("[CrewAgent] MAM: %s", mam_ctx[:120])
+
     # — Signal engine: buy-low/sell-high assessment for Agent 1 context
     price_assessment = "UNKNOWN"
     ensemble_summary = ""
@@ -993,7 +1053,7 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
     result_str = ""
     try:
         crew = _build_crew(live_eia, live_rss, market_regime, knowledge_ctx, greeks,
-                           uso_price, ensemble_summary, hmm_regime_ctx)
+                           uso_price, ensemble_summary, hmm_regime_ctx, mam_ctx)
         result_str = str(await loop.run_in_executor(None, crew.kickoff))
     except Exception as e:
         result_str = f"Crew execution error: {e}"

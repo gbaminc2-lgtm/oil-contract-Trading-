@@ -145,6 +145,12 @@ try:
 except ImportError:
     _HMM = False
 
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -1021,6 +1027,7 @@ def print_status() -> None:
     print(f"  Ecosystem    : {'READY' if _ECOSYSTEM  else 'UNAVAILABLE (install global_ecosystem.py)'}")
     print(f"  CrewAI Team  : {'READY' if _CREW       else 'UNAVAILABLE (pip install crewai)'}")
     print(f"  HMM Regime   : {'READY' if _HMM        else 'UNAVAILABLE (install hmm_regime.py)'}")
+    print(f"  Market Arch  : {'READY' if _MAM        else 'UNAVAILABLE (install market_architecture.py)'}")
     print("─" * 70)
     # Live HMM regime snapshot
     if _HMM:
@@ -1052,6 +1059,19 @@ def print_status() -> None:
         except Exception as hmm_e:
             print(f"  HMM State    : (unavailable — {hmm_e})")
     print("─" * 70)
+    # Phase-1 exchange latency table (Market Architecture Math)
+    if _MAM:
+        try:
+            mam      = _get_mam()
+            latencies = mam.all_exchange_latencies()
+            print("  EXCHANGE LATENCY ADVANTAGE (microwave vs fiber)")
+            for route, data in latencies.items():
+                print(f"    {route:<22} microwave={data['microwave_microseconds']:.0f}µs  "
+                      f"fiber={data['fiber_microseconds']:.0f}µs  "
+                      f"advantage={data['advantage_microseconds']:.0f}µs")
+        except Exception as mam_e:
+            print(f"  Market Arch  : (unavailable — {mam_e})")
+        print("─" * 70)
     log_files = sorted(LOG_DIR.glob("session_*.json"))
     print(f"  Session logs : {len(log_files)} archived  →  {LOG_DIR}/")
     if log_files:

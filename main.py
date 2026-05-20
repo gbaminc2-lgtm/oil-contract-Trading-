@@ -64,6 +64,13 @@ from risk_engine import (
     StressScenario, DrawdownState,
 )
 
+# ── Optional: Market Architecture Math ───────────────────────────────────────
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level   = logging.INFO,
@@ -541,6 +548,8 @@ Examples:
     p.add_argument("--spot",         type=float, default=72.0)
     p.add_argument("--sigma",        type=float, default=0.32)
     p.add_argument("--quiet",        action="store_true")
+    p.add_argument("--market-arch",  action="store_true",
+                   help="Run Market Architecture Math demo (all 4 phases) and exit")
     return p.parse_args()
 
 
@@ -549,6 +558,14 @@ if __name__ == "__main__":
 
     if args.risk_report:
         print(performance_report())
+        sys.exit(0)
+
+    if args.market_arch:
+        if not _MAM:
+            print("market_architecture.py not found. Ensure it is in the project directory.")
+            sys.exit(1)
+        mam = _get_mam()
+        mam.run_demo()
         sys.exit(0)
 
     if args.bsm_demo:

@@ -75,6 +75,12 @@ try:
 except ImportError:
     _HMM = False
 
+try:
+    from market_architecture import get_market_arch as _get_mam
+    _MAM = True
+except ImportError:
+    _MAM = False
+
 logging.basicConfig(
     level   = logging.INFO,
     format  = "%(asctime)s [%(levelname)s] %(message)s",
@@ -461,6 +467,27 @@ async def quant_risk_agent(
                                  * MAX_RISK_PER_TRADE_PCT
                                  * state.hmm_size_mult)
             position_lots     = total_usd_to_risk / risk_per_lot
+
+            # MAM Phase-4 cross-check: independent position-size validation
+            if _MAM:
+                try:
+                    mam = _get_mam()
+                    stop_ticks = max(1, int(round(risk_per_bbl / VSA_THRESHOLDS["TICK_SIZE_BBL"]
+                                                  if "TICK_SIZE_BBL" in VSA_THRESHOLDS else risk_per_bbl / 0.01)))
+                    tick_val   = VSA_THRESHOLDS.get("TICK_VALUE_USD", 1.00)
+                    mam_r      = mam.calculate_position_size(
+                        state.account_balance, MAX_RISK_PER_TRADE_PCT,
+                        stop_ticks, tick_val,
+                    )
+                    mam_lots = mam_r.get("max_contracts", position_lots)
+                    if mam_lots < position_lots:
+                        logger.info(
+                            "[Agent 4 | Risk] MAM Phase-4 cross-check: %.4f→%.4f lots",
+                            position_lots, mam_lots,
+                        )
+                        position_lots = mam_lots
+                except Exception:
+                    pass
 
             logger.info(
                 "[Agent 4 | Risk] ── POSITION INITIALISED ──────────────────"
