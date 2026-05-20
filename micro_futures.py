@@ -225,12 +225,23 @@ def size_for_daily_target(
 
 
 # ============================================================================
-# SECTION 4 — DUAL-SMA CROSSOVER SIGNAL ENGINE
+# SECTION 4 — SIGNAL ENGINE: MOMENTUM + BUY LOW / SELL HIGH
 # ============================================================================
+# Strategy principle:
+#   Momentum tells you WHICH DIRECTION the market is moving.
+#   Buy-Low/Sell-High tells you WHEN to enter at the best price.
+#
+#   Uptrend + price at a LOW  → BUY contracts (the ideal setup)
+#   Downtrend + price at a HIGH → SELL contracts (the ideal setup)
+#   Uptrend + price at a HIGH → WAIT (don't chase — let it pull back)
+#   Downtrend + price at a LOW → WAIT (don't catch the falling knife)
+#
+#   This produces fewer trades, better entry prices, and higher win rate
+#   than SMA crossover alone (which buys after the move already happened).
 
 @dataclass
 class OHLCBar:
-    """Single price bar for the MA engine."""
+    """Single price bar for the signal engine."""
     timestamp: datetime.datetime
     open:      float
     high:      float
@@ -239,13 +250,141 @@ class OHLCBar:
     volume:    float
 
 
+class MomentumValueEngine:
+    """
+    Momentum + Buy-Low/Sell-High signal engine for futures contracts.
+
+    Two components work together every bar:
+
+    MOMENTUM (direction):
+      20-bar price trend determines if we are in an uptrend or downtrend.
+      Uptrend:   fast_ma (10) > slow_ma (30) — bias is LONG
+      Downtrend: fast_ma (10) < slow_ma (30) — bias is SHORT
+
+    VALUE ENTRY (timing):
+      Bollinger Bands (20-bar, 2σ) detect statistical highs and lows.
+      RSI(14) confirms overbought / oversold conditions.
+
+      BUY  signal fires when:
+        - Momentum says UPTREND (fast > slow)
+        - AND price touches or crosses BELOW the lower Bollinger band (buy low)
+        - AND RSI < 45 (not overbought — confirming the low)
+
+      SELL signal fires when:
+        - Momentum says DOWNTREND (fast < slow)
+        - AND price touches or crosses ABOVE the upper Bollinger band (sell high)
+        - AND RSI > 55 (not oversold — confirming the high)
+
+    Exit:
+      Long position: exit when price reaches upper Bollinger (sold high) or
+                     stop is hit or RSI > 65 (overbought = take profit).
+      Short position: exit when price reaches lower Bollinger (bought back low)
+                      or RSI < 35.
+
+    Sources: Grimes — Art & Science of Technical Analysis;
+             Bittman — Trading Options as a Professional;
+             Heitkoetter — Complete Guide to Day Trading.
+    """
+
+    def __init__(self, fast: int = 10, slow: int = 30, bb_window: int = 20,
+                 rsi_period: int = 14):
+        self.fast_n     = fast
+        self.slow_n     = slow
+        self.bb_window  = bb_window
+        self.rsi_period = rsi_period
+        self._closes: Deque[float] = deque(maxlen=max(slow, bb_window, rsi_period) + 5)
+        self._prev_fast: Optional[float] = None
+        self._prev_slow: Optional[float] = None
+
+    def _rsi(self) -> float:
+        closes = list(self._closes)
+        if len(closes) < self.rsi_period + 1:
+            return 50.0
+        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        gains  = [d for d in deltas[-self.rsi_period:] if d > 0]
+        losses = [-d for d in deltas[-self.rsi_period:] if d < 0]
+        avg_gain = sum(gains) / self.rsi_period
+        avg_loss = sum(losses) / self.rsi_period
+        if avg_loss < 1e-9:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - 100 / (1 + rs)
+
+    def _bollinger(self) -> tuple:
+        closes = list(self._closes)
+        if len(closes) < self.bb_window:
+            price = closes[-1] if closes else 0
+            return price, price * 0.98, price * 1.02
+        window = closes[-self.bb_window:]
+        mean = sum(window) / self.bb_window
+        variance = sum((x - mean) ** 2 for x in window) / self.bb_window
+        std = math.sqrt(variance)
+        return mean, mean - 2 * std, mean + 2 * std
+
+    def update(self, bar: OHLCBar) -> Optional[str]:
+        """
+        Feed one bar. Returns:
+          'BUY'  — momentum uptrend + price at a LOW → buy contracts
+          'SELL' — momentum downtrend + price at a HIGH → sell contracts
+          'EXIT_LONG'  — price reached high → take profit on long
+          'EXIT_SHORT' — price reached low → take profit on short
+          None   — no signal (waiting for the right setup)
+        """
+        self._closes.append(bar.close)
+        if len(self._closes) < self.slow_n:
+            return None
+
+        closes    = list(self._closes)
+        fast_ma   = sum(closes[-self.fast_n:]) / self.fast_n
+        slow_ma   = sum(closes[-self.slow_n:]) / self.slow_n
+        rsi       = self._rsi()
+        _, bb_low, bb_high = self._bollinger()
+        price     = bar.close
+
+        uptrend   = fast_ma > slow_ma
+        downtrend = fast_ma < slow_ma
+
+        prev_fast = self._prev_fast
+        self._prev_fast = fast_ma
+        self._prev_slow = slow_ma
+
+        # ── BUY: momentum uptrend + price at a statistical LOW ───────────────
+        if uptrend and price <= bb_low * 1.002 and rsi < 45:
+            logger.info(
+                "[MomentumValue] BUY SETUP — Uptrend (fast=%.2f>slow=%.2f) "
+                "+ price=%.2f at/below BB_low=%.2f + RSI=%.1f (buy low in uptrend)",
+                fast_ma, slow_ma, price, bb_low, rsi,
+            )
+            return "BUY"
+
+        # ── SELL: momentum downtrend + price at a statistical HIGH ────────────
+        if downtrend and price >= bb_high * 0.998 and rsi > 55:
+            logger.info(
+                "[MomentumValue] SELL SETUP — Downtrend (fast=%.2f<slow=%.2f) "
+                "+ price=%.2f at/above BB_high=%.2f + RSI=%.1f (sell high in downtrend)",
+                fast_ma, slow_ma, price, bb_high, rsi,
+            )
+            return "SELL"
+
+        # ── EXIT LONG: price reached upper Bollinger (sell high) or overbought
+        if price >= bb_high * 0.998 and rsi > 65:
+            return "EXIT_LONG"
+
+        # ── EXIT SHORT: price reached lower Bollinger (bought back low)
+        if price <= bb_low * 1.002 and rsi < 35:
+            return "EXIT_SHORT"
+
+        return None
+
+    @property
+    def warmed_up(self) -> bool:
+        return len(self._closes) >= self.slow_n
+
+
 class SMACrossEngine:
     """
-    10/30-period SMA crossover engine — pure Python, no external deps.
-    Produces BUY / SELL / FLAT signals on each new bar.
-
-    Grimes Ch.12: use a fast/slow MA pair to identify momentum regime;
-    enter only when the cross is confirmed on the close.
+    10/30-period SMA crossover — retained as secondary momentum reference.
+    Primary entry logic now uses MomentumValueEngine above.
     """
 
     def __init__(self, fast: int = 10, slow: int = 30):
@@ -320,7 +459,7 @@ async def micro_futures_agent(
     """
     spec    = INSTRUMENTS.get(instrument, INSTRUMENTS["MCL"])
     ticker  = spec["ticker_yf"]
-    engine  = SMACrossEngine(fast_period, slow_period)
+    engine  = MomentumValueEngine(fast=fast_period, slow=slow_period)  # buy low/sell high + momentum
     session = DailySession(profit_target=daily_target)
     in_position = False
     entry_price = 0.0
@@ -371,63 +510,41 @@ async def micro_futures_agent(
                 open=104.0, high=104.5, low=103.8, close=104.2, volume=1200.0,
             )
 
-        sma_signal = engine.update(bar)
+        mv_signal = engine.update(bar)
 
-        # ── Ensemble confirmation (multi-factor gate) ──────────────────────
-        # SMA crossover provides intraday timing; ensemble provides regime
-        # agreement. Both must agree before entering — eliminates whipsaws.
-        ensemble_agrees = True
-        if _ENSEMBLE and sma_signal in ("BUY", "SELL"):
-            try:
-                ens = generate_ensemble_signal(ticker)
-                if sma_signal == "BUY"  and ens.direction != SignalDirection.BUY:
-                    ensemble_agrees = False
-                    logger.info(
-                        "[MicroFutures] SMA=BUY but ensemble=%s (score=%.2f) — skipping",
-                        ens.direction.value, ens.score,
-                    )
-                elif sma_signal == "SELL" and ens.direction != SignalDirection.SELL:
-                    ensemble_agrees = False
-                    logger.info(
-                        "[MicroFutures] SMA=SELL but ensemble=%s (score=%.2f) — skipping",
-                        ens.direction.value, ens.score,
-                    )
-                else:
-                    logger.info(
-                        "[MicroFutures] SMA+Ensemble AGREE: %s | confidence=%.0f%% | %s",
-                        sma_signal, ens.confidence * 100,
-                        " | ".join(f"{f.name}={f.raw_score:+.2f}" for f in ens.factors),
-                    )
-            except Exception as exc:
-                logger.warning("[MicroFutures] Ensemble check failed: %s — using SMA only", exc)
-
-        signal = sma_signal if ensemble_agrees else None
-
-        # ── Exit logic ─────────────────────────────────────────────────────
+        # ── Exit logic — sell high on longs, buy back low on shorts ────────
         if in_position:
-            hit_target = (
-                (contracts > 0 and bar.close >= entry_price + (entry_price - stop_price) * 2)
-                or (contracts < 0 and bar.close <= entry_price - (stop_price - entry_price) * 2)
-            )
             hit_stop = (
                 (contracts > 0 and bar.close <= stop_price)
                 or (contracts < 0 and bar.close >= stop_price)
             )
+            # Bollinger-based exits: sell long at upper band (sell high),
+            # cover short at lower band (buy back at the low)
+            take_profit = (
+                (contracts > 0 and mv_signal == "EXIT_LONG")
+                or (contracts < 0 and mv_signal == "EXIT_SHORT")
+            )
+            # Signal flip = trend reversed, get out
+            signal_flip = (contracts > 0 and mv_signal == "SELL") or \
+                          (contracts < 0 and mv_signal == "BUY")
 
-            if hit_target or hit_stop or signal in ("BUY", "SELL"):
+            if hit_stop or take_profit or signal_flip:
                 pnl_per_bbl = bar.close - entry_price if contracts > 0 else entry_price - bar.close
                 pnl = pnl_per_bbl * spec["bbl_per_lot"] * abs(contracts)
                 session.record(pnl)
+                reason = "STOP HIT" if hit_stop else \
+                         "SELL HIGH (Bollinger exit)" if take_profit else "TREND FLIP"
                 logger.info(
-                    "[MicroFutures] EXIT %s @ %.3f | P&L $%.2f | Reason: %s",
+                    "[MicroFutures] EXIT %s @ %.3f | P&L $%.2f | %s",
                     "LONG" if contracts > 0 else "SHORT",
-                    bar.close, pnl,
-                    "target" if hit_target else ("stop" if hit_stop else "signal flip"),
+                    bar.close, pnl, reason,
                 )
                 in_position = False
                 contracts   = 0
 
-        # ── Entry logic ────────────────────────────────────────────────────
+        signal = mv_signal
+
+        # ── Entry logic — buy at the low, sell at the high ─────────────────
         if not in_position and signal in ("BUY", "SELL") and engine.warmed_up:
             direction   = Direction.LONG if signal == "BUY" else Direction.SHORT
             stop_dist   = bar.close * 0.005   # 0.5% stop — ~$0.52/bbl at $104

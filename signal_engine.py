@@ -127,15 +127,22 @@ class WalkForwardResult:
 # ============================================================================
 # 2. FACTOR WEIGHTS  (tuned for WTI crude oil — adjust via walk-forward)
 # ============================================================================
-# Energy markets have strong carry (contango/backwardation) and momentum.
-# Mean reversion is weaker in trending commodity markets.
-# Vol regime is a risk-reducer, not a directional signal.
+# Strategy: MOMENTUM tells you the direction. VALUE ENTRY times the entry.
+# Both work together. Neither alone is sufficient.
+#
+# Buy-low/sell-high (value entry) is the PRIMARY entry gate —
+# it prevents chasing and gets you better prices.
+# Momentum is the DIRECTION FILTER — prevents catching falling knives.
+# Carry defines fundamental "cheap vs expensive" vs the forward curve.
+# Mean reversion adds short-term OU timing.
+# Vol regime scales size in crisis vs calm.
 
 FACTOR_WEIGHTS = {
-    "momentum":     0.35,   # strongest documented edge in commodities
-    "carry":        0.30,   # structural edge — contango/backwardation
-    "mean_revert":  0.20,   # weaker in trending markets
-    "vol_regime":   0.15,   # regime filter, not directional
+    "value_entry":  0.30,   # BUY LOW / SELL HIGH — Bollinger + RSI + 52W rank
+    "momentum":     0.25,   # trend direction — confirms which way is "low"
+    "carry":        0.25,   # structural edge — contango/backwardation = fundamental value
+    "mean_revert":  0.12,   # short-term OU mean reversion
+    "vol_regime":   0.08,   # size multiplier — reduce in crisis, amplify in calm
 }
 
 # Ensemble threshold to generate a trade signal
@@ -204,6 +211,125 @@ def _fetch_cot_net_position(ticker: str = "CL=F") -> float:
 
 # ============================================================================
 # 4. FACTOR CALCULATIONS
+# ============================================================================
+
+
+def _value_entry_score(close: pd.Series, high: Optional[pd.Series] = None,
+                       low: Optional[pd.Series] = None) -> Tuple[float, str]:
+    """
+    BUY LOW / SELL HIGH — value entry timing factor.
+
+    Three sub-signals combined:
+
+    ① Bollinger Band position (20-day, 2σ)
+       Price at lower band = statistically cheap → score +1
+       Price at upper band = statistically expensive → score -1
+       This is the core "buy low sell high" statistical measure.
+
+    ② RSI(14) — momentum of price changes
+       RSI < 30 = oversold = price beat down too far → buy signal
+       RSI > 70 = overbought = price driven too high → sell signal
+       RSI between 30–70 = neutral (no edge from this sub-signal)
+
+    ③ 52-week price percentile rank
+       Bottom 20% of 52W range = historically cheap → buy
+       Top 20% of 52W range = historically expensive → sell
+       This anchors "low" and "high" to a full year of price history.
+
+    Combined score in [-1, +1].
+    Positive = price is LOW relative to its range → favours BUY.
+    Negative = price is HIGH relative to its range → favours SELL.
+
+    CRITICAL: This factor alone is NOT sufficient. A low price in a downtrend
+    can go lower (falling knife). Always combine with momentum direction.
+    The ensemble does this automatically.
+
+    Sources: Grimes — Art & Science of Technical Analysis;
+             Bittman — Trading Options as a Professional (Bollinger entries);
+             Sherbin — How to Price and Trade Options (RSI confirmation).
+    """
+    if len(close) < 52:
+        return 0.0, "Insufficient history for value entry"
+
+    price = float(close.iloc[-1])
+
+    # ── Sub-signal 1: Bollinger Band position ────────────────────────────────
+    bb_window = 20
+    bb_mean = float(close.rolling(bb_window).mean().iloc[-1])
+    bb_std  = float(close.rolling(bb_window).std().iloc[-1])
+    if bb_std < 1e-9:
+        bb_score = 0.0
+        bb_expl  = "Bollinger: zero std (no signal)"
+    else:
+        upper = bb_mean + 2 * bb_std
+        lower = bb_mean - 2 * bb_std
+        # Position: 0 = at lower band (buy), 1 = at upper band (sell)
+        bb_position = (price - lower) / max(upper - lower, 1e-9)
+        bb_position = float(np.clip(bb_position, 0, 1))
+        bb_score = 1.0 - 2.0 * bb_position  # +1 at lower band, -1 at upper band
+        zone = "LOWER BAND (cheap)" if bb_position < 0.25 else \
+               "UPPER BAND (expensive)" if bb_position > 0.75 else "MIDRANGE"
+        bb_expl = (
+            f"Bollinger(20,2σ): price={price:.2f}, "
+            f"lower={lower:.2f}, upper={upper:.2f}, "
+            f"position={bb_position*100:.0f}% → {zone}"
+        )
+
+    # ── Sub-signal 2: RSI(14) ─────────────────────────────────────────────────
+    rsi_period = 14
+    if len(close) >= rsi_period + 1:
+        delta  = close.diff().dropna()
+        gain   = delta.clip(lower=0).rolling(rsi_period).mean().iloc[-1]
+        loss   = (-delta.clip(upper=0)).rolling(rsi_period).mean().iloc[-1]
+        rs     = gain / max(loss, 1e-9)
+        rsi    = float(100 - 100 / (1 + rs))
+
+        if rsi < 30:
+            rsi_score = (30 - rsi) / 30.0   # +1 at RSI=0, 0 at RSI=30
+            rsi_expl  = f"RSI={rsi:.1f} → OVERSOLD (buy opportunity)"
+        elif rsi > 70:
+            rsi_score = -(rsi - 70) / 30.0  # -1 at RSI=100, 0 at RSI=70
+            rsi_expl  = f"RSI={rsi:.1f} → OVERBOUGHT (sell opportunity)"
+        else:
+            rsi_score = (50 - rsi) / 50.0 * 0.3  # weak signal in neutral zone
+            rsi_expl  = f"RSI={rsi:.1f} → NEUTRAL (no edge from RSI)"
+        rsi_score = float(np.clip(rsi_score, -1, 1))
+    else:
+        rsi_score = 0.0
+        rsi_expl  = "RSI: insufficient history"
+
+    # ── Sub-signal 3: 52-week price percentile rank ───────────────────────────
+    lookback_252 = min(252, len(close))
+    price_history = close.tail(lookback_252)
+    pct_rank = float((price_history < price).mean())  # 0 = bottom, 1 = top of range
+
+    if pct_rank < 0.20:
+        pct_score = 1.0 - pct_rank * 5   # +0.8 to +1.0 in bottom quintile
+        pct_expl  = f"52W rank={pct_rank*100:.0f}% → HISTORICALLY CHEAP (bottom 20%)"
+    elif pct_rank > 0.80:
+        pct_score = -(pct_rank - 0.80) * 5   # -0.8 to -1.0 in top quintile
+        pct_expl  = f"52W rank={pct_rank*100:.0f}% → HISTORICALLY EXPENSIVE (top 20%)"
+    else:
+        pct_score = (0.50 - pct_rank) * 0.6  # mild signal in middle range
+        pct_expl  = f"52W rank={pct_rank*100:.0f}% → MID-RANGE (neutral)"
+    pct_score = float(np.clip(pct_score, -1, 1))
+
+    # ── Combine (Bollinger weighted most — most robust for intraday) ──────────
+    combined = 0.45 * bb_score + 0.35 * rsi_score + 0.20 * pct_score
+    combined = float(np.clip(combined, -1, 1))
+
+    bias = "BUY (price is LOW)" if combined > 0.15 else \
+           "SELL (price is HIGH)" if combined < -0.15 else "NEUTRAL"
+
+    explanation = (
+        f"Value Entry: {bias} (combined={combined:+.2f})\n"
+        f"    {bb_expl}\n"
+        f"    {rsi_expl}\n"
+        f"    {pct_expl}"
+    )
+    return combined, explanation
+
+
 # ============================================================================
 
 def _momentum_score(close: pd.Series) -> Tuple[float, str]:
@@ -373,12 +499,14 @@ def generate_ensemble_signal(ticker: str = "CL=F",
     close = close.astype(float).dropna()
 
     # Factor scores
-    mom_score,  mom_expl  = _momentum_score(close)
-    carry_score, carry_expl = _carry_score(close)
-    mr_score,   mr_expl   = _mean_reversion_score(close)
-    vol_score,  vol_expl  = _vol_regime_score(close)
+    val_score,  val_expl   = _value_entry_score(close)   # BUY LOW / SELL HIGH
+    mom_score,  mom_expl   = _momentum_score(close)       # trend direction
+    carry_score, carry_expl = _carry_score(close)          # structural value
+    mr_score,   mr_expl    = _mean_reversion_score(close)  # short-term OU
+    vol_score,  vol_expl   = _vol_regime_score(close)      # size regime
 
     factors = [
+        FactorScore("value_entry", val_score,   FACTOR_WEIGHTS["value_entry"], val_expl),
         FactorScore("momentum",    mom_score,   FACTOR_WEIGHTS["momentum"],    mom_expl),
         FactorScore("carry",       carry_score, FACTOR_WEIGHTS["carry"],       carry_expl),
         FactorScore("mean_revert", mr_score,    FACTOR_WEIGHTS["mean_revert"], mr_expl),
@@ -387,6 +515,15 @@ def generate_ensemble_signal(ticker: str = "CL=F",
 
     # Weighted ensemble
     ensemble = sum(f.raw_score * f.weight for f in factors)
+
+    # Agreement bonus: when momentum and value_entry BOTH agree (same sign),
+    # reward with +10% boost — this is the "buy low in an uptrend" setup
+    # that professional traders prize most.
+    if mom_score * val_score > 0:  # same sign = agreement
+        agreement_strength = abs(mom_score * val_score)  # 0–1
+        bonus = 0.10 * agreement_strength * (1 if ensemble > 0 else -1)
+        ensemble += bonus
+
     ensemble = float(np.clip(ensemble, -1, 1))
 
     # Direction
@@ -416,8 +553,13 @@ def generate_ensemble_signal(ticker: str = "CL=F",
 
     # Teaching explanation
     dominant = max(factors, key=lambda f: abs(f.raw_score * f.weight))
+    agreement = "✓ MOMENTUM+VALUE AGREE (buy low in uptrend)" \
+        if mom_score * val_score > 0.1 else \
+        "✗ MOMENTUM+VALUE DIVERGE (wait for better entry)" \
+        if mom_score * val_score < -0.1 else "~ neutral"
     explanation = (
         f"[{ticker}] {direction.value} | {strength.value} | "
+        f"agreement: {agreement}\n  "
         f"score={ensemble:+.3f} | confidence={confidence*100:.0f}%\n"
         f"  Dominant factor: {dominant.name.upper()} ({dominant.raw_score:+.2f})\n"
         f"  → {dominant.explanation}\n"
