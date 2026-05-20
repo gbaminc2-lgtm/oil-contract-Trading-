@@ -57,9 +57,16 @@ try:
     )
     _RISK_ENGINE = True
 except ImportError:
-    ACCOUNT_EQUITY_USD      = 500.0       # $500 starting budget fallback
-    MAX_RISK_PER_TRADE_PCT  = 0.02        # 2% per-trade risk ceiling
+    ACCOUNT_EQUITY_USD      = 500.0
+    MAX_RISK_PER_TRADE_PCT  = 0.02
     _RISK_ENGINE = False
+
+# ── Multi-factor ensemble (adds regime context to VSA signals) ───────────────
+try:
+    from signal_engine import generate_ensemble_signal, SignalDirection
+    _ENSEMBLE = True
+except ImportError:
+    _ENSEMBLE = False
 
 logging.basicConfig(
     level   = logging.INFO,
@@ -289,29 +296,62 @@ async def context_execution_agent(
         signal = state.active_signal
         bar    = state.signal_bar
 
+        # ── Ensemble regime gate (three-way confirmation) ──────────────────
+        # VSA gives the bar-level signal. Macro trend gives direction bias.
+        # Ensemble adds factor-model regime context. All three must agree.
+        ensemble_ok = True
+        if _ENSEMBLE:
+            try:
+                ens = generate_ensemble_signal("CL=F")
+                if signal == "SOS_SHARPSHOOTER" and ens.direction != SignalDirection.BUY:
+                    ensemble_ok = False
+                    logger.info(
+                        "[Agent 3 | Execution] SOS blocked by ensemble (%s, score=%.2f). "
+                        "Three-way confirmation failed.",
+                        ens.direction.value, ens.score,
+                    )
+                elif signal == "SOW_SHARPSHOOTER" and ens.direction != SignalDirection.SELL:
+                    ensemble_ok = False
+                    logger.info(
+                        "[Agent 3 | Execution] SOW blocked by ensemble (%s, score=%.2f). "
+                        "Three-way confirmation failed.",
+                        ens.direction.value, ens.score,
+                    )
+                else:
+                    logger.info(
+                        "[Agent 3 | Execution] Ensemble agrees: %s | score=%.2f | confidence=%.0f%%",
+                        ens.direction.value, ens.score, ens.confidence * 100,
+                    )
+            except Exception as exc:
+                logger.warning("[Agent 3] Ensemble check error: %s — proceeding without", exc)
+
+        if not ensemble_ok:
+            state.active_signal = None
+            continue
+
         if signal == "SOS_SHARPSHOOTER" and state.trend_state == "LONG_ONLY":
             logger.info(
-                "[Agent 3 | Execution] Context validated: Bullish signal matches "
-                "LONG_ONLY macro bias."
+                "[Agent 3 | Execution] THREE-WAY CONFIRMATION: VSA=SOS + Macro=LONG_ONLY "
+                "+ Ensemble=BUY → entering LONG."
             )
             order = OrderRequest(
                 direction   = "BUY",
                 entry_price = bar.close,
-                stop_loss   = bar.low - 0.05,   # 5c/bbl below signal bar low (WTI tick = $0.01)
+                stop_loss   = bar.low - 0.05,
                 signal_type = signal,
             )
             await order_queue.put(order)
-            state.active_signal = None   # prevent double-execution
+            state.active_signal = None
 
         elif signal == "SOW_SHARPSHOOTER" and state.trend_state == "SHORT_ONLY":
             logger.info(
-                "[Agent 3 | Execution] Context validated: Bearish signal matches "
-                "SHORT_ONLY macro bias."
+                "[Agent 3 | Execution] THREE-WAY CONFIRMATION: VSA=SOW + Macro=SHORT_ONLY "
+                "+ Ensemble=SELL → entering SHORT."
             )
             order = OrderRequest(
                 direction   = "SELL",
                 entry_price = bar.close,
-                stop_loss   = bar.high + 0.05,  # 5c/bbl above signal bar high
+                stop_loss   = bar.high + 0.05,
                 signal_type = signal,
             )
             await order_queue.put(order)

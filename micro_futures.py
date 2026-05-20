@@ -73,12 +73,22 @@ try:
     )
     _RISK = True
 except ImportError:
-    ACCOUNT_EQUITY_USD     = 500.0     # $500 starting budget
-    MAX_RISK_PER_TRADE_PCT = 0.02      # 2% risk per trade = $10
-    MAX_DAILY_LOSS_USD     = 100.0     # 20% daily loss limit = $100
-    MAX_WTI_CONTRACTS      = 1         # 1 micro contract max
-    DAILY_TARGET_USD       = 5_000.0   # $5,000/day profit target
+    ACCOUNT_EQUITY_USD     = 500.0
+    MAX_RISK_PER_TRADE_PCT = 0.02
+    MAX_DAILY_LOSS_USD     = 100.0
+    MAX_WTI_CONTRACTS      = 1
+    DAILY_TARGET_USD       = 5_000.0
     _RISK = False
+
+# ── Multi-factor ensemble signal (replaces pure SMA crossover) ───────────────
+try:
+    from signal_engine import (
+        generate_ensemble_signal, SignalDirection, SignalStrength,
+        kelly_position_size,
+    )
+    _ENSEMBLE = True
+except ImportError:
+    _ENSEMBLE = False
 
 try:
     from strategy_agent import (
@@ -361,7 +371,37 @@ async def micro_futures_agent(
                 open=104.0, high=104.5, low=103.8, close=104.2, volume=1200.0,
             )
 
-        signal = engine.update(bar)
+        sma_signal = engine.update(bar)
+
+        # ── Ensemble confirmation (multi-factor gate) ──────────────────────
+        # SMA crossover provides intraday timing; ensemble provides regime
+        # agreement. Both must agree before entering — eliminates whipsaws.
+        ensemble_agrees = True
+        if _ENSEMBLE and sma_signal in ("BUY", "SELL"):
+            try:
+                ens = generate_ensemble_signal(ticker)
+                if sma_signal == "BUY"  and ens.direction != SignalDirection.BUY:
+                    ensemble_agrees = False
+                    logger.info(
+                        "[MicroFutures] SMA=BUY but ensemble=%s (score=%.2f) — skipping",
+                        ens.direction.value, ens.score,
+                    )
+                elif sma_signal == "SELL" and ens.direction != SignalDirection.SELL:
+                    ensemble_agrees = False
+                    logger.info(
+                        "[MicroFutures] SMA=SELL but ensemble=%s (score=%.2f) — skipping",
+                        ens.direction.value, ens.score,
+                    )
+                else:
+                    logger.info(
+                        "[MicroFutures] SMA+Ensemble AGREE: %s | confidence=%.0f%% | %s",
+                        sma_signal, ens.confidence * 100,
+                        " | ".join(f"{f.name}={f.raw_score:+.2f}" for f in ens.factors),
+                    )
+            except Exception as exc:
+                logger.warning("[MicroFutures] Ensemble check failed: %s — using SMA only", exc)
+
+        signal = sma_signal if ensemble_agrees else None
 
         # ── Exit logic ─────────────────────────────────────────────────────
         if in_position:
@@ -418,7 +458,7 @@ async def micro_futures_agent(
                     confidence   = 0.60,
                     vol_regime   = VolRegime.NORMAL,
                     market_regime= MarketRegime.TRENDING,
-                    rationale    = f"SMA({fast_period}/{slow_period}) crossover on {instrument}",
+                    rationale    = f"SMA({fast_period}/{slow_period}) crossover + ensemble multi-factor agreement on {instrument}",
                 )
                 assessment = evaluate_trade(sig_obj)
                 if assessment.status == ApprovalStatus.REJECTED:
