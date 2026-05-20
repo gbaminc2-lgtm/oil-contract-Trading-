@@ -98,6 +98,17 @@ try:
 except ImportError:
     _ECOSYSTEM = False
 
+# ── CrewAI Trading Team (4-agent: Ingestion/Analyst/Risk/Execution) ───────────
+try:
+    from crew_agent import (
+        run_crew_cycle, get_crew_metrics, build_knowledge_base,
+        _init_db as _init_crew_db, CREW_CYCLE_SECS,
+    )
+    _init_crew_db()
+    _CREW = True
+except ImportError:
+    _CREW = False
+
 # ── VSA 4-Agent Team ─────────────────────────────────────────────────────────
 try:
     from vsa_agents import (
@@ -719,6 +730,7 @@ async def _run_demo() -> None:
     print(f"  Micro Agent : {'ACTIVE' if _MICRO     else 'unavailable'}")
     print(f"  Pipeline    : {'ACTIVE' if _PIPELINE  else 'unavailable'}")
     print(f"  Ecosystem   : {'ACTIVE' if _ECOSYSTEM else 'unavailable'}")
+    print(f"  CrewAI Team : {'ACTIVE' if _CREW      else 'unavailable'}")
     print("═" * 70)
     logger.info("[Demo] All agents completed successfully.")
 
@@ -812,6 +824,61 @@ async def _run_simulation() -> None:
 
 # ============================================================================
 # SECTION 11 — MASTER AUTONOMOUS LOOP (24/7)
+# ── Crew Coordinator ─────────────────────────────────────────────────────────
+
+async def crew_coordinator(session: AutoSession) -> None:
+    """
+    8th autonomous task — runs CrewAI 4-agent trading team every 30 min
+    during MARKET_OPEN. Feeds crew P&L into session.total_realized_pnl.
+    """
+    if not _CREW:
+        logger.warning("[CrewCoordinator] crew_agent.py not available — skipping.")
+        return
+
+    logger.info("[CrewCoordinator] Building institutional knowledge base...")
+    retriever = await asyncio.get_event_loop().run_in_executor(
+        None, build_knowledge_base
+    )
+    logger.info("[CrewCoordinator] Knowledge base ready. Waiting for MARKET_OPEN...")
+
+    crew_running = False
+    while True:
+        if session.flat_for_day:
+            if crew_running:
+                logger.info("[CrewCoordinator] Session flat — crew halted.")
+                crew_running = False
+            await asyncio.sleep(30)
+            continue
+
+        phase = current_phase()
+
+        if phase == MarketPhase.MARKET_OPEN:
+            if not crew_running:
+                logger.info("[CrewCoordinator] MARKET_OPEN — launching crew cycle loop.")
+                crew_running = True
+
+            try:
+                result = await run_crew_cycle(retriever)
+                logger.info(
+                    "[CrewCoordinator] Cycle complete | Risk=%s | Trade=%s | %.0fms",
+                    result.risk_status, result.trade_executed, result.latency_ms,
+                )
+                if result.trade_executed:
+                    session.total_realized_pnl += result.pnl_estimate
+            except Exception as e:
+                logger.error("[CrewCoordinator] Cycle error: %s", e)
+
+            # Sleep for full cycle interval or until session end, checking flat_for_day
+            elapsed = 0
+            while elapsed < CREW_CYCLE_SECS and not session.flat_for_day:
+                await asyncio.sleep(10)
+                elapsed += 10
+        else:
+            if crew_running:
+                logger.info("[CrewCoordinator] Market closed — crew standing by.")
+                crew_running = False
+            await asyncio.sleep(60)
+
 # ============================================================================
 
 async def run_autonomous() -> None:
@@ -852,9 +919,10 @@ async def run_autonomous() -> None:
         asyncio.create_task(post_market_reporter(session),  name="PostMarket"),
         asyncio.create_task(overnight_monitor(session),     name="Overnight"),
         asyncio.create_task(ecosystem_coordinator(session), name="EcosystemCoordinator"),
+        asyncio.create_task(crew_coordinator(session),      name="CrewCoordinator"),
     ]
 
-    logger.info("All 7 autonomous tasks launched. Running 24/7. Press Ctrl+C to stop.")
+    logger.info("All 8 autonomous tasks launched. Running 24/7. Press Ctrl+C to stop.")
 
     try:
         await asyncio.gather(*tasks)
@@ -895,6 +963,7 @@ def print_status() -> None:
     print(f"  Pipeline     : {'READY' if _PIPELINE   else 'UNAVAILABLE (install main.py)'}")
     print(f"  Risk Engine  : {'READY' if _RISK       else 'UNAVAILABLE (install risk_engine.py)'}")
     print(f"  Ecosystem    : {'READY' if _ECOSYSTEM  else 'UNAVAILABLE (install global_ecosystem.py)'}")
+    print(f"  CrewAI Team  : {'READY' if _CREW       else 'UNAVAILABLE (pip install crewai)'}")
     print("─" * 70)
     log_files = sorted(LOG_DIR.glob("session_*.json"))
     print(f"  Session logs : {len(log_files)} archived  →  {LOG_DIR}/")

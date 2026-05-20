@@ -7,12 +7,14 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 
 ---
 
-## Architecture — 8-File Split
+## Architecture — 10-File Split
 
 | File | Responsibility | Do Not Modify |
 |------|---------------|---------------|
-| `autonomous_agent.py` | **Master 24/7 AI controller** — coordinates ALL agents across 4 market phases | Phase schedule, session limits |
+| `autonomous_agent.py` | **Master 24/7 AI controller** — coordinates ALL 8 agent tasks across 4 market phases | Phase schedule, session limits |
 | `global_ecosystem.py` | **7-agent global system** — IB bracket orders, XGBoost ML, Claude leadership, OPEC/IEA scraper, SPAN margin, FastAPI webhook | `GLOBAL_EXCHANGE_REGISTRY`, agent topology |
+| `crew_agent.py` | **CrewAI 4-agent trading team** — IngestionOfficer, FundamentalAnalyst, RiskOfficer, ExecutionBroker; ChromaDB memory, EIA API, Alpaca paper, SQLite ledger | Agent roles, evaluate_trade() gate, paper-only URL |
+| `dashboard.py` | **Streamlit telemetry UI** — real-time PnL, Black-76 Greeks surface, latency profile, Discord/Slack alert simulator | DB schema paths |
 | `data_agent.py` | Market data: spot prices, forward curves, GARCH, crack spreads, storage economics, IV surface, ML features | Ticker constants, contract specs |
 | `strategy_agent.py` | Black-76 / BSM engine, Monte Carlo (GBM + OU), NAV model, all 5 trade strategies, Three-Statement model, PPM generator | Pricing formulae |
 | `risk_engine.py` | **ALL hardcoded risk limits**, VaR (parametric/historical/MC), ES/CVaR, stress tests, Greeks limits, Basel III capital | Section 1 constants |
@@ -119,11 +121,15 @@ pip --version             # pip 24.x
 ## Dependencies
 
 ```bash
-# Core pipeline (all 8 modules)
-pip install yfinance pandas numpy scipy scikit-learn requests loguru pydantic backtrader
+# Core pipeline (all 10 modules)
+pip install yfinance pandas numpy scipy scikit-learn requests loguru pydantic backtrader python-dotenv
 
 # Global ecosystem additions (global_ecosystem.py)
 pip install xgboost beautifulsoup4 fastapi uvicorn ib_insync anthropic
+
+# CrewAI trading team + dashboard (crew_agent.py + dashboard.py)
+pip install crewai langchain-anthropic langchain-openai langchain-community
+pip install chromadb pypdf alpaca-trade-api feedparser streamlit plotly
 ```
 
 All imports have graceful degradation guards:
@@ -139,9 +145,15 @@ All imports have graceful degradation guards:
 | `_BS4` | `beautifulsoup4` | No OPEC/IEA scraping |
 | `_FASTAPI` | `fastapi` + `uvicorn` | No webhook server |
 | `_ANTHROPIC` | `anthropic` | No Claude leadership agent |
+| `_CREW` | `crewai` | No CrewAI team (crew_agent.py gracefully exits) |
+| `_LC_ANTHROPIC` | `langchain-anthropic` | Falls back to OpenAI LLM |
+| `_CHROMA` | `chromadb` | Agents run without vector memory |
+| `_PDF` | `pypdf` | No PDF ingestion |
+| `_ALPACA` | `alpaca-trade-api` | Paper orders simulated locally |
+| `_FEEDPARSER` | `feedparser` | Mock RSS headlines |
 
 The core 6-module pipeline (`data_agent` → `strategy_agent` → `risk_engine` → `main` → `vsa_agents` → `micro_futures`) runs fully offline.  
-`global_ecosystem.py` degrades gracefully — each optional dependency is guarded independently.
+`global_ecosystem.py` and `crew_agent.py` each degrade gracefully — every optional dependency is guarded independently.
 
 ---
 
@@ -199,16 +211,37 @@ vsa_agents.py  (VSA 4-agent system)
   └── quant_risk_agent()      → async, 1% sizing → execution stub
 
 autonomous_agent.py  (master 24/7 controller)
-  ├── run_autonomous()        → 24/7 asyncio loop — coordinates ALL 7 tasks
+  ├── run_autonomous()        → 24/7 asyncio loop — coordinates ALL 8 tasks
   ├── risk_monitor()          → async, 10s checks, enforces $100 loss limit + $5K target
   ├── pre_market_runner()     → async, 08:00–09:00 ET, runs full main.py pipeline
   ├── vsa_coordinator()       → async, launches/shuts VSA 4-agent team at market open/close
   ├── micro_coordinator()     → async, launches/shuts MCL micro agent at market open/close
   ├── ecosystem_coordinator() → async, launches global_ecosystem 7-agent system at market open
+  ├── crew_coordinator()      → async, launches CrewAI 4-agent team every 30 min at MARKET_OPEN
   ├── post_market_reporter()  → async, 16:30 ET, session report + JSON archive → ./logs/
   ├── overnight_monitor()     → async, 30-min heartbeat during off-hours
   ├── AutoSession             → master shared state (P&L, phase, flat flag, agent list)
   └── MarketPhase             → PRE_MARKET | MARKET_OPEN | POST_MARKET | OVERNIGHT
+
+crew_agent.py  (CrewAI 4-agent decentralized trading team)
+  ├── run_crew_cycle()        → async, single ingest→analyze→risk→execute cycle
+  ├── build_knowledge_base()  → ChromaDB seeded from CLAUDE.md + 16 institutional sources
+  ├── fetch_eia_data()        → EIA V2 API weekly crude storage (live or mock)
+  ├── fetch_rss_headlines()   → Reuters/CNBC RSS macro news feed
+  ├── fetch_market_regime()   → Alpaca paper account USO/UNG 5-day closes
+  ├── compute_black76_greeks()→ Black-76 Δ/Γ/Θ/V (strategy_agent or inline scipy)
+  ├── submit_paper_order()    → Alpaca paper-api.alpaca.markets (evaluate_trade() gated)
+  ├── get_crew_metrics()      → dict (daily_pnl, trade_count, win_rate, avg_latency_ms)
+  ├── TelemetryNotifier       → Discord + Slack webhook dispatcher
+  ├── _init_db()              → SQLite schema (options_portfolio, agent_decisions, telemetry)
+  └── CrewCycleResult         → dataclass returned to autonomous_agent.crew_coordinator()
+
+dashboard.py  (Streamlit real-time telemetry UI)
+  ├── main()                  → Streamlit app (run: streamlit run dashboard.py)
+  ├── Tab 1: Options Portfolio → positions, Greeks (Δ/Vega bar chart), PnL
+  ├── Tab 2: Agent Decisions  → cognitive audit trail, market regime
+  ├── Tab 3: Telemetry Logs   → latency line chart, CRITICAL anomaly alerts
+  └── Tab 4: Alert Simulator  → inject test Discord/Slack webhooks
 
 global_ecosystem.py  (7-agent international system)
   ├── start_global_ecosystem()          → async entry — IB connect + 7-agent launch loop
@@ -601,6 +634,100 @@ python autonomous_agent.py
 - Keep `_IB`, `_XGB`, `_BS4`, `_FASTAPI`, `_ANTHROPIC` guards around all optional imports
 - Repatriate non-USD cash to USD via FX sweep before end of session (Agent 6)
 - Keep the `maintenance_sentinel()` coroutine running alongside agent tasks
+
+---
+
+## CrewAI Enterprise Trading Team (`crew_agent.py` + `dashboard.py`)
+
+### Overview
+Decentralized 4-agent architecture running every 30 minutes during `MARKET_OPEN`. Agents share a ChromaDB vector memory seeded from CLAUDE.md and 16 institutional sources. Every trade signal passes `evaluate_trade()` before any Alpaca paper order. Runs as the 8th asyncio task inside `autonomous_agent.py`.
+
+### 4-Agent Topology
+
+| # | Agent | Role | Output |
+|---|-------|------|--------|
+| 1 | `IngestionOfficer` | EIA API + RSS → structured matrix | Curve structure, inventory signal, geopolitical risk |
+| 2 | `FundamentalAnalyst` | Black-76 options thesis | Strategy type, strikes, expiry, Greeks confirmed |
+| 3 | `RiskOfficer` | evaluate_trade() gate + Greek limits | APPROVED or REJECTED manifest |
+| 4 | `ExecutionBroker` | Alpaca paper order + SQLite log | Order confirmation, ledger record |
+
+### Knowledge Base (ChromaDB)
+16 institutional sources embedded as vectors at startup:
+
+| Source | Domain |
+|--------|--------|
+| `CLAUDE.md` (always available) | All 21 books, all agent constraints, pricing conventions |
+| EIA Volatility Framework | Inventory, storage, weekly petroleum status |
+| FERC Market Primer | Regulatory, market structure |
+| CME Customer Center | Contract specs, NYMEX Ch.200 |
+| PwC Commodity Risk | Risk management protocols |
+| EDHEC Risk Management | Greek limits, portfolio risk |
+| JPM/Barclays Whitepapers | Macro outlook, hedge fund strategy |
+| QuantStart AlgoTrading | Signal pipeline, ML features |
+| Lacima Energy Derivatives | Energy options pricing theory |
+| Houston Futures & Options | Black-76 vs BSM, options mechanics |
+| + 6 more | WorldBank, RMI, DOE, Meketa, RevenueAI, Alvarez |
+
+Agents query: `"Black-76 energy futures options, contango/backwardation, SPAN margin, crack spreads, NYMEX MCL specs"`
+
+### SQLite Ledger (`logs/crew_trading_ledger.db`)
+
+| Table | Purpose |
+|-------|---------|
+| `options_portfolio` | Active positions: Greeks, premium, PnL, risk status |
+| `agent_decisions` | Full cognitive audit trail per agent |
+| `system_telemetry` | Latency, component health, error log |
+| `trade_logs` | Every approved/rejected trade with capital allocation |
+
+### Running the CrewAI System
+
+```bash
+# Offline demo — no API keys required
+python crew_agent.py --demo
+
+# Readiness status check
+python crew_agent.py --status
+
+# Live 30-min cycle loop (requires ANTHROPIC_API_KEY in .env)
+python crew_agent.py
+
+# Real-time Streamlit dashboard (separate terminal)
+streamlit run dashboard.py
+
+# Via autonomous agent (recommended — 8th task, auto-coordinated)
+python autonomous_agent.py
+```
+
+### Required `.env` Keys for Full CrewAI Operation
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...          # Claude Sonnet 4.6 LLM (primary)
+OPENAI_API_KEY=sk-...                 # OpenAI GPT-4o (fallback LLM + embeddings)
+EIA_API_KEY=your-eia-key              # eia.gov/developer — free registration
+ALPACA_API_KEY=your-alpaca-key        # paper.alpaca.markets account
+ALPACA_SECRET_KEY=your-secret         # paper account secret
+ALPACA_BASE_URL=https://paper-api.alpaca.markets   # NEVER change to live URL
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...   # optional
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...     # optional
+```
+
+### CrewAI Constraints for Claude Code
+
+#### NEVER DO:
+- Change `ALPACA_BASE_URL` to `https://alpaca.markets` — paper only, always
+- Remove `evaluate_trade()` pre-screen from `run_crew_cycle()` before `submit_paper_order()`
+- Use BSM (`black_scholes()`) for energy options in agent tasks — must use Black-76
+- Hardcode dollar limits — always read `ACCOUNT_EQUITY_USD`, `MAX_RISK_PER_TRADE_PCT` from `risk_engine.py`
+- Add `time.sleep()` — use `asyncio.sleep()` only; `crew.kickoff()` runs in `run_in_executor`
+- Commit `OPENAI_API_KEY`, `ALPACA_API_KEY`, or `EIA_API_KEY` — all stay in `.env` (gitignored)
+
+#### ALWAYS DO:
+- Call `compute_black76_greeks()` (not BSM) for all energy options pricing in agent tasks
+- Run `evaluate_trade()` pre-screen in `run_crew_cycle()` before building the crew
+- Keep all 4 graceful-degradation guards (`_CREW`, `_LC_ANTHROPIC`, `_CHROMA`, `_ALPACA`)
+- Log every cycle to SQLite — both APPROVED and REJECTED — for audit trail
+- Check `session.flat_for_day` in `crew_coordinator()` before each 30-min cycle
+- Use `run_in_executor` for `crew.kickoff()` — it is synchronous and must not block the event loop
 
 ---
 
