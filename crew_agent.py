@@ -586,7 +586,10 @@ def fetch_hmm_regime_context(ticker: str = "CL=F") -> str:
             f"P(BEAR)={probs.get('BEAR',0):.2f} "
             f"P(VOLATILE)={probs.get('VOLATILE',0):.2f} "
             f"P(SIDEWAYS)={probs.get('SIDEWAYS',0):.2f} | "
-            f"Kelly_size_mult={mult:.2f} | {result.explanation}"
+            f"Kelly_size_mult={mult:.2f} | "
+            f"MAP_direction={result.map_direction} "
+            f"MAP_fracChange={result.map_frac_change:+.4f} | "
+            f"{result.explanation}"
         )
     except Exception as e:
         return f"HMM regime fetch error: {e}. Assume SIDEWAYS, size_mult=0.5."

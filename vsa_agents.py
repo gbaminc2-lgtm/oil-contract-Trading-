@@ -165,6 +165,7 @@ class SharedMarketState:
     signal_bar:      Optional[VSABar]= None
     account_balance: float           = field(default_factory=lambda: ACCOUNT_EQUITY_USD)
     hmm_size_mult:   float           = 1.0     # HMM regime-based position size scalar
+    map_direction:   str             = "FLAT"  # MAP next-bar prediction: UP|DOWN|FLAT
 
 
 # ============================================================================
@@ -211,7 +212,8 @@ async def macro_trend_agent(state: SharedMarketState,
                     if len(close_series) >= 63:
                         result = get_hmm_regime(ticker=ticker, close=close_series)
                         mult   = regime_size_multiplier(result)
-                        state.hmm_size_mult = mult
+                        state.hmm_size_mult  = mult
+                        state.map_direction  = result.map_direction
                         r = result.regime
                         if r == OilRegime.BULL:
                             state.trend_state = "LONG_ONLY"
@@ -220,8 +222,11 @@ async def macro_trend_agent(state: SharedMarketState,
                         else:  # VOLATILE or SIDEWAYS
                             state.trend_state = "FLAT"
                         logger.info(
-                            "[Agent 1 | Trend] HMM regime=%s bias=%s size_mult=%.2f | %s",
-                            r.value, state.trend_state, mult, result.explanation,
+                            "[Agent 1 | Trend] HMM=%s bias=%s size_mult=%.2f "
+                            "MAP=%s(fc=%+.4f) | %s",
+                            r.value, state.trend_state, mult,
+                            result.map_direction, result.map_frac_change,
+                            result.explanation,
                         )
                         hmm_resolved = True
                 except Exception as hmm_exc:

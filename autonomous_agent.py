@@ -246,9 +246,10 @@ class AutoSession:
     agents_running:     List[str]      = field(default_factory=list)
     errors_today:       int            = 0
 
-    # HMM regime (updated by risk_monitor every cycle)
+    # HMM regime + MAP prediction (updated by risk_monitor every cycle)
     hmm_regime:         str            = "UNKNOWN"
     hmm_size_mult:      float          = 1.0
+    hmm_map_direction:  str            = "FLAT"   # UP | DOWN | FLAT (Gupta & Dhingra 2012)
 
     def record_pnl(self, pnl: float, source: str = "unknown") -> None:
         self.total_realized_pnl += pnl
@@ -270,7 +271,7 @@ class AutoSession:
     def summary_line(self) -> str:
         return (
             f"[Session {self.date}] Phase={self.phase.value} | "
-            f"HMM={self.hmm_regime}(×{self.hmm_size_mult:.2f}) | "
+            f"HMM={self.hmm_regime}(×{self.hmm_size_mult:.2f}|MAP={self.hmm_map_direction}) | "
             f"P&L=${self.total_realized_pnl:+,.2f} | "
             f"Target=${DAILY_TARGET_USD:,.0f} | LossLimit=${MAX_DAILY_LOSS_USD:,.0f} | "
             f"Approved={self.approved_signals} | Flat={self.flat_for_day}"
@@ -319,11 +320,15 @@ async def risk_monitor(session: AutoSession, check_interval: float = 10.0) -> No
                     close_s = raw["close"].dropna()
                     if len(close_s) >= 63:
                         result = get_hmm_regime(ticker="CL=F", close=close_s)
-                        session.hmm_regime    = result.regime.value
-                        session.hmm_size_mult = regime_size_multiplier(result)
-                        logger.info("[RiskMonitor|HMM] %s size_mult=%.2f | %s",
-                                    session.hmm_regime, session.hmm_size_mult,
-                                    result.explanation)
+                        session.hmm_regime       = result.regime.value
+                        session.hmm_size_mult    = regime_size_multiplier(result)
+                        session.hmm_map_direction = result.map_direction
+                        logger.info(
+                            "[RiskMonitor|HMM] %s size_mult=%.2f MAP=%s(fc=%+.4f) | %s",
+                            session.hmm_regime, session.hmm_size_mult,
+                            result.map_direction, result.map_frac_change,
+                            result.explanation,
+                        )
                         # VOLATILE crisis regime: warn loudly (size already reduced by HMM)
                         if session.hmm_regime == "VOLATILE" and not session.flat_for_day:
                             logger.warning(
@@ -1034,6 +1039,8 @@ def print_status() -> None:
                       f"P(BEAR)={probs.get('BEAR',0):.2f}  "
                       f"P(VOLATILE)={probs.get('VOLATILE',0):.2f}  "
                       f"P(SIDEWAYS)={probs.get('SIDEWAYS',0):.2f}")
+                print(f"  MAP (Gupta & Dhingra 2012): {result.map_direction} "
+                      f"(fracChange={result.map_frac_change:+.4f})")
                 print(f"  Rationale    : {result.explanation[:80]}")
         except Exception as hmm_e:
             print(f"  HMM State    : (unavailable — {hmm_e})")

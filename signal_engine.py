@@ -493,20 +493,21 @@ def _vol_regime_score(close: pd.Series,
 def _long_term_trend_regime(close: pd.Series,
                             ticker: str = "CL=F",
                             volume: Optional[pd.Series] = None,
-                            ) -> Tuple[str, str, float]:
+                            ) -> Tuple[str, str, float, str]:
     """
     Long-term trend regime filter.
 
     Primary path: Baum-Welch Gaussian HMM (hmm_regime.py) with 4 hidden states
     (BULL, BEAR, VOLATILE, SIDEWAYS) fitted to multivariate price features.
-    Returns soft posterior γ_t(i) for probabilistic position sizing.
+    Also runs the MAP-HMM next-bar predictor (Gupta & Dhingra, IEEE 2012).
 
     Fallback: 50MA / 200MA heuristic (used when _HMM is False or data < 63 bars).
 
-    Returns: (regime_str, explanation, size_multiplier)
-      regime_str      — "UPTREND" | "DOWNTREND" | "SIDEWAYS" | "VOLATILE"
-      explanation     — human-readable audit string
+    Returns: (regime_str, explanation, size_multiplier, map_direction)
+      regime_str    — "UPTREND" | "DOWNTREND" | "SIDEWAYS" | "VOLATILE"
+      explanation   — human-readable audit string
       size_multiplier — [0.0, 1.0] Kelly position sizing scalar from HMM posteriors
+      map_direction — "UP" | "DOWN" | "FLAT" from Gupta & Dhingra MAP prediction
     """
     # ── HMM primary path ──────────────────────────────────────────────────────
     if _HMM and len(close) >= 63:
@@ -529,9 +530,10 @@ def _long_term_trend_regime(close: pd.Series,
                 f"P(BEAR)={result.probabilities.get('BEAR',0):.2f} "
                 f"P(VOL)={result.probabilities.get('VOLATILE',0):.2f} "
                 f"P(SIDE)={result.probabilities.get('SIDEWAYS',0):.2f} | "
-                f"size_mult={multiplier:.2f} | {result.explanation}"
+                f"size_mult={multiplier:.2f} | MAP={result.map_direction} "
+                f"(fc={result.map_frac_change:+.4f}) | {result.explanation}"
             )
-            return regime_str, expl, multiplier
+            return regime_str, expl, multiplier, result.map_direction
         except Exception as exc:
             logger.warning("HMM regime failed (%s) — falling back to 50/200MA", exc)
 
@@ -559,7 +561,7 @@ def _long_term_trend_regime(close: pd.Series,
                 f"spread={spread_pct:.1f}%) → reduced size [MA fallback]")
         multiplier = 0.5
 
-    return regime_str, expl, multiplier
+    return regime_str, expl, multiplier, "FLAT"
 
 
 def generate_ensemble_signal(ticker: str = "CL=F",
@@ -585,7 +587,9 @@ def generate_ensemble_signal(ticker: str = "CL=F",
     close = close.astype(float).dropna()
 
     # Long-term trend regime via Baum-Welch HMM (falls back to 50/200MA)
-    lt_regime, lt_expl, hmm_size_mult = _long_term_trend_regime(close, ticker=ticker)
+    lt_regime, lt_expl, hmm_size_mult, map_direction = _long_term_trend_regime(
+        close, ticker=ticker
+    )
 
     # Factor scores
     val_score,   val_expl    = _value_entry_score(close)
@@ -624,6 +628,12 @@ def generate_ensemble_signal(ticker: str = "CL=F",
         ensemble = 0.0
     elif lt_regime in ("SIDEWAYS", "VOLATILE", "UNKNOWN"):
         ensemble *= 0.5  # reduce conviction; HMM size_mult handles dollar sizing
+    # MAP-HMM direction alignment bonus (Gupta & Dhingra, IEEE 2012)
+    # +0.05 when MAP next-bar prediction agrees with ensemble direction
+    if map_direction == "UP" and ensemble > 0:
+        ensemble += 0.05
+    elif map_direction == "DOWN" and ensemble < 0:
+        ensemble -= 0.05
     # Apply HMM soft-posterior size multiplier to score magnitude
     ensemble *= hmm_size_mult
 
@@ -662,7 +672,7 @@ def generate_ensemble_signal(ticker: str = "CL=F",
         f"[{ticker}] {direction.value} | {strength.value} | "
         f"agreement: {agreement}\n  "
         f"score={ensemble:+.3f} | confidence={confidence*100:.0f}% | "
-        f"HMM_size_mult={hmm_size_mult:.2f}\n"
+        f"HMM_size_mult={hmm_size_mult:.2f} | MAP={map_direction}\n"
         f"  Regime: {lt_expl}\n"
         f"  Dominant factor: {dominant.name.upper()} ({dominant.raw_score:+.2f})\n"
         f"  → {dominant.explanation}\n"

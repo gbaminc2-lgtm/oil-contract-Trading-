@@ -78,6 +78,40 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 | `autonomous_agent.py` | `risk_monitor()` refreshes every 5 min; shown in `--status` |
 | `global_ecosystem.py` | ClaudeLeadershipAgent prompt enriched; VOLATILE blocks ML entries |
 
+### MAP-HMM Next-Bar Predictor (Gupta & Dhingra, IEEE 2012)
+
+A second, independent D=3 HMM runs alongside the regime HMM to predict next-bar direction.
+
+| Concept | Implementation |
+|---------|---------------|
+| Paper | "Stock Market Prediction Using Hidden Markov Models," IEEE 2012 |
+| Features D=3 | fracChange=(C-O)/O, fracHigh=(H-O)/O, fracLow=(O-L)/O |
+| MAP formula | `Ô_{d+1} = argmax_O P(O₁,...,O_d,O\|λ)` |
+| Grid | 50 × 10 × 10 = 5 000 candidates (vectorised via meshgrid + logsumexp) |
+| Direction | fracChange > 0.002 → UP; < −0.002 → DOWN; else FLAT |
+| Cache | Separate `_ohlc_hmm_model`, retrains every `_RETRAIN_EVERY=63` bars |
+
+**MAP computation (log-space)**:
+```
+log_trans[j]  = lse_i[ log α_d(i) + log A(i,j) ]          ← O(N²) once
+log P(O_{d+1}) = lse_j[ log_trans[j] + log b_j(O_{d+1}) ]  ← O(N) per candidate
+```
+
+**`RegimeResult` MAP fields** (added with defaults — backward compatible):
+- `map_direction`   — "UP" | "DOWN" | "FLAT"
+- `map_frac_change` — best fracChange from 5 000-point grid
+- `map_explanation` — formatted string with logP and Gupta & Dhingra attribution
+
+**Integration — MAP direction used in**:
+
+| File | Usage |
+|------|-------|
+| `signal_engine.py` | ±0.05 alignment bonus on ensemble score when MAP agrees |
+| `vsa_agents.py` | Agent 1 logs `map_direction` and `map_frac_change` |
+| `crew_agent.py` | `fetch_hmm_regime_context()` includes MAP fields |
+| `autonomous_agent.py` | `--status` shows MAP prediction; `risk_monitor` logs MAP |
+| `global_ecosystem.py` | ClaudeLeadershipAgent prompt includes MAP direction |
+
 ### HMM Constraints for Claude Code
 
 #### NEVER DO:
@@ -85,12 +119,15 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 - Remove the `_RETRAIN_EVERY = 63` cache — retraining every bar would over-fit noise
 - Use HMM posteriors to directly set dollar position sizes — always multiply through Kelly
 - Bypass the `_HMM` guard — all 5 integration files have graceful fallback to MA heuristic
+- Change the MAP grid dimensions (50×10×10) without re-validating direction thresholds
+- Merge the OHLC HMM (`_ohlc_hmm_model`) with the regime HMM — they have different D
 
 #### ALWAYS DO:
 - Keep log-space forward/backward to prevent float underflow on long series
 - Add `1e-6 * np.eye(D)` covariance regularization in M-step (prevents singular Σ)
-- Return `RegimeResult` from `get_hmm_regime()` — callers depend on `.regime`, `.probabilities`, `.explanation`
+- Return `RegimeResult` from `get_hmm_regime()` — callers depend on `.regime`, `.probabilities`, `.explanation`, `.map_direction`, `.map_frac_change`
 - Source `regime_size_multiplier()` from `hmm_regime.py` — do not re-implement in other modules
+- Treat `regime_size_multiplier()` as returning `float` — it no longer returns a dict
 
 ---
 

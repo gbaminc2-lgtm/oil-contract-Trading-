@@ -464,7 +464,7 @@ class ClaudeLeadershipAgent:
                     hmm_result  = _get_hmm_regime(ticker="CL=F", close=close_s)  # type: ignore[call-arg]
                     hmm_mult    = _regime_size_multiplier(hmm_result)             # type: ignore[call-arg]
                     global_memory.hmm_regime    = hmm_result.regime.value
-                    global_memory.hmm_size_mult = hmm_mult
+                    global_memory.hmm_size_mult = float(hmm_mult)
                     probs = hmm_result.probabilities
                     hmm_ctx_str = (
                         f"HMM state={hmm_result.regime.value} "
@@ -472,7 +472,10 @@ class ClaudeLeadershipAgent:
                         f"P(BEAR)={probs.get('BEAR',0):.2f} "
                         f"P(VOL)={probs.get('VOLATILE',0):.2f} "
                         f"P(SIDE)={probs.get('SIDEWAYS',0):.2f} "
-                        f"size_mult={hmm_mult:.2f} | {hmm_result.explanation}"
+                        f"size_mult={hmm_mult:.2f} | "
+                        f"MAP_direction={hmm_result.map_direction} "
+                        f"MAP_fracChange={hmm_result.map_frac_change:+.4f} | "
+                        f"{hmm_result.explanation}"
                     )
                     logger.info("[Leadership|HMM] %s", hmm_ctx_str)
             except Exception as hmm_exc:

@@ -48,6 +48,10 @@ Sources:
   Rabiner, "A Tutorial on Hidden Markov Models" (1989)
   Ang & Timmermann, "Regime Changes and Financial Markets" (2012)
   Hamilton, "A New Approach to the Economic Analysis of Time Series" (1989)
+  Gupta & Dhingra, "Stock Market Prediction Using Hidden Markov Models" (IEEE 2012)
+    MAP next-bar prediction: Ô_{d+1} = argmax_O P(O₁,...,O_d,O|λ)
+    D=3 OHLC fractional features: fracChange=(C-O)/O, fracHigh=(H-O)/O, fracLow=(O-L)/O
+    5000-point vectorised grid search: fracChange∈[-0.05,0.05]×50, fracHigh/Low∈[0,0.04]×10
 """
 
 from __future__ import annotations
@@ -113,12 +117,16 @@ class HMMParams:
 @dataclass
 class RegimeResult:
     """Output of get_hmm_regime()."""
-    regime:        OilRegime
-    probabilities: Dict[str, float]   # soft posteriors {regime_name: prob}
-    log_likelihood: float
-    n_iter:        int
+    regime:          OilRegime
+    probabilities:   Dict[str, float]   # soft posteriors {regime_name: prob}
+    log_likelihood:  float
+    n_iter:          int
     trained_on_bars: int
-    explanation:   str
+    explanation:     str
+    # MAP next-bar prediction (Gupta & Dhingra, IEEE 2012)
+    map_direction:   str   = "FLAT"
+    map_frac_change: float = 0.0
+    map_explanation: str   = "MAP prediction unavailable"
 
 
 # ============================================================================
@@ -485,13 +493,50 @@ def build_hmm_features(close: "pd.Series",
     return df.values.astype(float)
 
 
+def build_ohlc_features(open_s:  "pd.Series",
+                        high_s:  "pd.Series",
+                        low_s:   "pd.Series",
+                        close_s: "pd.Series") -> np.ndarray:
+    """
+    Build the D=3 OHLC fractional observation matrix for MAP-HMM.
+
+    Gupta & Dhingra (IEEE 2012) equation (3):
+      fracChange = (Close − Open) / Open
+      fracHigh   = (High  − Open) / Open
+      fracLow    = (Open  − Low)  / Open
+
+    All three features are non-negative by construction for fracHigh/fracLow
+    and centred near zero for fracChange, making them well-suited to a
+    diagonal Gaussian emission model.
+    """
+    if not _PD:
+        raise ImportError("pandas required for build_ohlc_features")
+
+    denom = pd.Series(open_s).astype(float).clip(lower=1e-9)
+    frac_change = (pd.Series(close_s).astype(float) - denom) / denom
+    frac_high   = (pd.Series(high_s).astype(float)  - denom) / denom
+    frac_low    = (denom - pd.Series(low_s).astype(float))   / denom
+
+    df = pd.DataFrame({
+        "frac_change": frac_change,
+        "frac_high":   frac_high,
+        "frac_low":    frac_low,
+    }).dropna()
+
+    return df.values.astype(float)
+
+
 # ============================================================================
 # 4. MODULE-LEVEL MODEL CACHE  (avoid retraining every call)
 # ============================================================================
 
-_hmm_model:     Optional[OilMarketHMM] = None
-_hmm_bar_count: int = 0
-_RETRAIN_EVERY  = 63   # retrain every quarter (~63 trading days)
+_hmm_model:      Optional[OilMarketHMM] = None
+_hmm_bar_count:  int = 0
+_RETRAIN_EVERY   = 63   # retrain every quarter (~63 trading days)
+
+# OHLC MAP-HMM cache (Gupta & Dhingra 2012) — separate D=3 model
+_ohlc_hmm_model:     Optional[OilMarketHMM] = None
+_ohlc_hmm_bar_count: int = 0
 
 
 def get_hmm_regime(ticker:   str = "CL=F",
@@ -499,7 +544,8 @@ def get_hmm_regime(ticker:   str = "CL=F",
                    volume:   Optional["pd.Series"] = None,
                    retrain:  bool = False) -> RegimeResult:
     """
-    High-level API: return current WTI market regime via Baum-Welch HMM.
+    High-level API: return current WTI market regime via Baum-Welch HMM
+    plus MAP next-bar direction prediction (Gupta & Dhingra, IEEE 2012).
 
     Caches the trained model and retrains only when the observation count
     has grown by _RETRAIN_EVERY bars since last training.
@@ -512,7 +558,7 @@ def get_hmm_regime(ticker:   str = "CL=F",
 
     Returns:
         RegimeResult with regime label, soft probabilities, log-likelihood,
-        and a plain-English explanation string.
+        MAP next-bar direction, and plain-English explanation strings.
     """
     global _hmm_model, _hmm_bar_count
 
@@ -535,7 +581,7 @@ def get_hmm_regime(ticker:   str = "CL=F",
     if len(X) < 20:
         return _fallback_regime()
 
-    # 3. Train or reuse cached model
+    # 3. Train or reuse cached regime HMM
     needs_train = (
         _hmm_model is None
         or retrain
@@ -567,11 +613,10 @@ def get_hmm_regime(ticker:   str = "CL=F",
     for idx, reg in enumerate(REGIME_ORDER):
         state_label = model._label_state(idx)
         probs[state_label.value] = probs.get(state_label.value, 0.0) + float(gamma_last[idx])
-    # Fill missing keys
     for reg in OilRegime:
         probs.setdefault(reg.value, 0.0)
 
-    # 6. Build explanation
+    # 6. Build regime explanation
     dominant_prob = probs[regime.value]
     regime_descs = {
         OilRegime.BULL:     "supply tightening, backwardation — buy pullbacks",
@@ -588,6 +633,9 @@ def get_hmm_regime(ticker:   str = "CL=F",
         f"logL={model._last_ll:.2f}"
     )
 
+    # 7. MAP next-bar prediction (Gupta & Dhingra, IEEE 2012)
+    map_direction, map_frac_change, map_expl = _run_map_prediction(ticker, retrain)
+
     return RegimeResult(
         regime          = regime,
         probabilities   = probs,
@@ -595,7 +643,50 @@ def get_hmm_regime(ticker:   str = "CL=F",
         n_iter          = model._last_iter,
         trained_on_bars = model._n_obs,
         explanation     = explanation,
+        map_direction   = map_direction,
+        map_frac_change = map_frac_change,
+        map_explanation = map_expl,
     )
+
+
+def _run_map_prediction(ticker: str, retrain: bool) -> Tuple[str, float, str]:
+    """
+    Run the OHLC MAP-HMM pipeline.  Returns (direction, frac_change, explanation).
+    Isolated so get_hmm_regime() stays readable.
+    """
+    global _ohlc_hmm_model, _ohlc_hmm_bar_count
+    try:
+        ohlc_df = _fetch_wti_ohlc(ticker)
+        if ohlc_df is None or len(ohlc_df) < 30:
+            return "FLAT", 0.0, "[MAP] Insufficient OHLC data."
+        X_ohlc = build_ohlc_features(
+            ohlc_df["open"], ohlc_df["high"], ohlc_df["low"], ohlc_df["close"]
+        )
+        if len(X_ohlc) < 20:
+            return "FLAT", 0.0, "[MAP] Too few OHLC observations."
+        needs_ohlc_train = (
+            _ohlc_hmm_model is None
+            or retrain
+            or (len(X_ohlc) - _ohlc_hmm_bar_count) >= _RETRAIN_EVERY
+        )
+        if needs_ohlc_train:
+            logger.info("[MAP-HMM] Training OHLC HMM on %d bars ...", len(X_ohlc))
+            ohlc_model = _make_ohlc_hmm()
+            ohlc_model.fit(X_ohlc)
+            _ohlc_hmm_model     = ohlc_model
+            _ohlc_hmm_bar_count = len(X_ohlc)
+        else:
+            ohlc_model = _ohlc_hmm_model
+        best_fc, direction, log_prob = map_predict_next_bar(ohlc_model, X_ohlc)
+        expl = (
+            f"[MAP-HMM] Next-bar prediction: {direction} "
+            f"(fracChange={best_fc:+.4f}, logP={log_prob:.2f}) "
+            f"— Gupta & Dhingra (IEEE 2012)"
+        )
+        return direction, best_fc, expl
+    except Exception as e:
+        logger.warning("[MAP-HMM] Prediction failed: %s", e)
+        return "FLAT", 0.0, f"[MAP] Error: {e}"
 
 
 # ============================================================================
@@ -641,6 +732,122 @@ def _lse(a: np.ndarray, axis=None, keepdims=False) -> np.ndarray:
     return result
 
 
+def _make_ohlc_hmm() -> "OilMarketHMM":
+    """
+    Factory for the D=3 OHLC MAP-HMM (Gupta & Dhingra, IEEE 2012).
+    Prior means calibrated to WTI 1-day OHLC fractional move distributions.
+    """
+    hmm = OilMarketHMM(n_states=4, n_features=3)
+    # Features: [fracChange, fracHigh, fracLow]
+    hmm.params.mu = np.array([
+        [ 0.008, 0.015, 0.008],   # BULL: positive close, moderate high, small low
+        [-0.008, 0.007, 0.016],   # BEAR: negative close, small high, extended low
+        [ 0.001, 0.025, 0.025],   # VOLATILE: flat close, large high+low excursions
+        [ 0.001, 0.006, 0.006],   # SIDEWAYS: flat close, tight range
+    ])
+    scales = np.array([
+        [0.006**2, 0.012**2, 0.010**2],
+        [0.006**2, 0.010**2, 0.012**2],
+        [0.015**2, 0.020**2, 0.020**2],
+        [0.003**2, 0.005**2, 0.005**2],
+    ])
+    sigma = np.zeros((4, 3, 3))
+    for i in range(4):
+        sigma[i] = np.diag(scales[i])
+    hmm.params.sigma = sigma
+    return hmm
+
+
+def _fetch_wti_ohlc(ticker: str) -> Optional["pd.DataFrame"]:
+    """Fetch 3-year daily OHLC from yfinance for the MAP-HMM."""
+    if not _YF or not _PD:
+        return None
+    try:
+        df = yf.download(ticker, period="3y", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or len(df) < 30:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df.columns = [c.lower() for c in df.columns]
+        needed = {"open", "high", "low", "close"}
+        if not needed.issubset(set(df.columns)):
+            return None
+        return df[["open", "high", "low", "close"]].dropna()
+    except Exception as e:
+        logger.warning("[MAP-HMM] OHLC fetch failed: %s", e)
+        return None
+
+
+def map_predict_next_bar(model: "OilMarketHMM",
+                         X_ohlc: np.ndarray,
+                         latency: int = 10) -> Tuple[float, str, float]:
+    """
+    MAP next-bar OHLC prediction (Gupta & Dhingra, IEEE 2012).
+
+    Ô_{d+1} = argmax_O  P(O₁, O₂, ..., O_d, O | λ)
+
+    Computed as:
+      log P(O₁...O_d, O_{d+1}|λ) = lse_j[ log_trans[j] + log b_j(O_{d+1}) ]
+    where:
+      log_trans[j] = lse_i[ log α_d(i) + log A(i,j) ]   (precomputed once)
+
+    Grid (Table II, paper): 50 × 10 × 10 = 5 000 candidates
+      fracChange ∈ [−0.05, +0.05]  (50 steps)
+      fracHigh   ∈ [  0.0,  0.04]  (10 steps)
+      fracLow    ∈ [  0.0,  0.04]  (10 steps)
+
+    Direction threshold: |fracChange| > 0.002 → UP / DOWN, else FLAT.
+
+    Returns:
+        (best_frac_change, direction_str, best_log_prob)
+    """
+    _DIRECTION_THRESHOLD = 0.002
+
+    window = X_ohlc[-latency:] if len(X_ohlc) >= latency else X_ohlc
+
+    log_A    = np.log(np.clip(model.params.A, 1e-300, 1))
+    log_B_w  = model._log_emission(window)
+    log_alpha, _ = model._forward(window, log_B_w)
+    log_alpha_d  = log_alpha[-1]   # (N,) — forward variable at last observed bar
+
+    # Precompute log P(next state = j | X_1..d) for each state j
+    N = model.n_states
+    log_trans = np.array([_lse(log_alpha_d + log_A[:, j]) for j in range(N)])
+
+    # 5 000-point candidate grid (vectorised — no Python loops over candidates)
+    fc_grid = np.linspace(-0.05,  0.05, 50)
+    fh_grid = np.linspace( 0.0,   0.04, 10)
+    fl_grid = np.linspace( 0.0,   0.04, 10)
+    fc_all, fh_all, fl_all = np.meshgrid(fc_grid, fh_grid, fl_grid, indexing="ij")
+    candidates = np.column_stack([
+        fc_all.ravel(), fh_all.ravel(), fl_all.ravel()
+    ])   # (5000, 3)
+
+    log_B_cand  = model._log_emission(candidates)          # (5000, N)
+    log_combined = log_trans[None, :] + log_B_cand         # (5000, N)
+    if _SCIPY:
+        log_probs = _logsumexp(log_combined, axis=1)       # (5000,)
+    else:
+        c = log_combined.max(axis=1, keepdims=True)
+        log_probs = (c[:, 0]
+                     + np.log(np.exp(log_combined - c).sum(axis=1)))
+
+    best_idx        = int(np.argmax(log_probs))
+    best_frac_change = float(candidates[best_idx, 0])
+    best_log_prob   = float(log_probs[best_idx])
+
+    if best_frac_change > _DIRECTION_THRESHOLD:
+        direction = "UP"
+    elif best_frac_change < -_DIRECTION_THRESHOLD:
+        direction = "DOWN"
+    else:
+        direction = "FLAT"
+
+    return best_frac_change, direction, best_log_prob
+
+
 def _fallback_regime() -> RegimeResult:
     """Return a neutral fallback when HMM cannot be computed."""
     probs = {r.value: 0.25 for r in OilRegime}
@@ -658,34 +865,29 @@ def _fallback_regime() -> RegimeResult:
 # 6. POSITION SIZING HELPER (Baum-Welch soft posteriors → size multiplier)
 # ============================================================================
 
-def regime_size_multiplier(result: RegimeResult,
-                           base_risk_pct: float = 0.02) -> Dict[str, float]:
+def regime_size_multiplier(result: RegimeResult) -> float:
     """
-    Convert HMM soft posteriors γ_t(i) into a risk-adjusted size multiplier.
+    Convert HMM soft posteriors γ_t(i) into a position-size multiplier (0–1).
 
-    Philosophy (Hull, Risk Management & Financial Institutions Ch.16):
-      BULL / BEAR  → full size when confidence ≥ 70%, scale otherwise
-      VOLATILE     → always halve size (OPEC shock risk)
-      SIDEWAYS     → quarter size (no clear edge)
+    Multiplier table (CLAUDE.md / Hull Ch.16):
+      BULL / BEAR  → 0.50 + γ_{regime} (confidence bonus), capped at 1.0
+      VOLATILE     → 0.25  (75% size reduction — OPEC shock / crisis)
+      SIDEWAYS     → 0.50  (half size — no directional edge)
 
-    Returns dict with keys: multiplier, risk_pct, explanation.
+    Returns:
+        float in [0.25, 1.0] — multiply raw position size by this value.
     """
     regime = result.regime
     p      = result.probabilities.get(regime.value, 0.25)
 
     if regime == OilRegime.VOLATILE:
-        mult = 0.50   # half-size in crisis regardless of confidence
+        mult = 0.25   # 75% reduction per CLAUDE.md
     elif regime in (OilRegime.BULL, OilRegime.BEAR):
-        mult = min(1.0, 0.50 + p)  # 50% base + confidence bonus, capped at 100%
+        mult = min(1.0, 0.50 + p)   # full Kelly at high confidence
     else:
-        mult = 0.25   # sideways = quarter size
+        mult = 0.50   # SIDEWAYS = half size
 
-    risk_pct = base_risk_pct * mult
-    expl = (
-        f"HMM size: regime={regime.value} p={p*100:.1f}% → "
-        f"multiplier={mult:.2f} → risk={risk_pct*100:.2f}% of account"
-    )
-    return {"multiplier": mult, "risk_pct": risk_pct, "explanation": expl}
+    return mult
 
 
 # ============================================================================
@@ -697,16 +899,21 @@ if __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
     print("=" * 70)
-    print("  OIL MARKET HMM — Baum-Welch Regime Detector")
-    print("  ECE 417 Multimedia Signal Processing → WTI Application")
+    print("  OIL MARKET HMM — Baum-Welch Regime Detector + MAP Predictor")
+    print("  ECE 417 / Gupta & Dhingra (IEEE 2012) → WTI Application")
     print("=" * 70)
 
     result = get_hmm_regime("CL=F")
     print(result.explanation)
+    print()
+    print(result.map_explanation)
+    print()
 
-    sizing = regime_size_multiplier(result)
-    print()
-    print(sizing["explanation"])
-    print()
-    print(f"Regime is:  {result.regime.value}")
-    print(f"Confidence: {result.probabilities.get(result.regime.value, 0)*100:.1f}%")
+    mult = regime_size_multiplier(result)
+    p    = result.probabilities.get(result.regime.value, 0)
+    print(
+        f"Regime:        {result.regime.value}  ({p*100:.1f}% confidence)\n"
+        f"MAP direction: {result.map_direction}  "
+        f"(fracChange={result.map_frac_change:+.4f})\n"
+        f"Size mult:     {mult:.2f}x"
+    )

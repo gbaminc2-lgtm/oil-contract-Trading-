@@ -260,6 +260,73 @@ a'_ij = Σ_t ξ_t(i,j) / Σ_j Σ_t ξ_t(i,j)
 | **VOLATILE** | Crisis — OPEC shock / geopolitical event, high vol | 0.25 (75% size reduction) |
 | **SIDEWAYS** | Balanced demand/supply, range-bound, low vol | 0.50 (half size) |
 
+---
+
+## MAP-HMM Next-Bar Predictor (`hmm_regime.py`)
+
+A second, independent Gaussian HMM runs alongside the regime engine to predict next-bar **price direction** using the **Maximum a Posteriori (MAP)** approach from:
+
+> Gupta & Dhingra, *"Stock Market Prediction Using Hidden Markov Models"*, IEEE 2012
+
+### Algorithm
+
+**D=3 OHLC fractional features** (equation 3, paper):
+```
+fracChange = (Close − Open) / Open
+fracHigh   = (High  − Open) / Open
+fracLow    = (Open  − Low)  / Open
+```
+
+**MAP prediction formula**:
+```
+Ô_{d+1} = argmax_O  P(O₁, O₂, ..., O_d, O | λ)
+```
+
+**Efficient computation** (log-space, fully vectorised):
+```
+log_trans[j]    = lse_i[ log α_d(i) + log A(i,j) ]           ← precomputed once, O(N²)
+log P(O_{d+1})  = lse_j[ log_trans[j] + log b_j(O_{d+1}) ]   ← O(N) per candidate
+```
+
+**5 000-point grid** (Table II, paper):
+
+| Dimension | Range | Steps |
+|-----------|-------|-------|
+| fracChange | [−0.05, +0.05] | 50 |
+| fracHigh | [0.0, 0.04] | 10 |
+| fracLow | [0.0, 0.04] | 10 |
+
+**Direction threshold**: `|fracChange| > 0.002` → UP / DOWN, else FLAT
+
+### Integration
+
+| File | MAP Usage |
+|------|-----------|
+| `signal_engine.py` | ±0.05 alignment bonus on ensemble score |
+| `vsa_agents.py` | Agent 1 logs MAP direction alongside HMM trend state |
+| `crew_agent.py` | `fetch_hmm_regime_context()` includes MAP fields |
+| `autonomous_agent.py` | `--status` shows MAP prediction; `risk_monitor` logs it |
+| `global_ecosystem.py` | ClaudeLeadershipAgent prompt enriched with MAP direction |
+
+### Quick Usage
+
+```python
+from hmm_regime import get_hmm_regime
+
+result = get_hmm_regime("CL=F")
+
+# Regime (Baum-Welch)
+print(result.regime)          # OilRegime.BULL
+print(result.probabilities)   # {'BULL': 0.78, ...}
+
+# MAP next-bar prediction (Gupta & Dhingra 2012)
+print(result.map_direction)   # "UP"
+print(result.map_frac_change) # +0.0072
+print(result.map_explanation) # "[MAP-HMM] Next-bar prediction: UP ..."
+```
+
+---
+
 ### Why HMM Beats Simple Moving Averages
 
 1. **Regime persistence** — the transition matrix A captures that markets don't jump between states instantly
