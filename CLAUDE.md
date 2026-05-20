@@ -7,7 +7,7 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 
 ---
 
-## Architecture — 10-File Split
+## Architecture — 11-File Split
 
 | File | Responsibility | Do Not Modify |
 |------|---------------|---------------|
@@ -21,6 +21,7 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 | `main.py` | 10-step orchestration pipeline, CLI entry point, demo modes | Pipeline sequence |
 | `vsa_agents.py` | Async 4-agent VSA team: trend filter, sharpshooter scanner, context/execution, quant risk | `VSA_THRESHOLDS` keys, agent topology |
 | `micro_futures.py` | Micro & E-mini energy futures agent: SMA crossover, $5K/day target, backtrader cerebro backtest | `INSTRUMENTS` specs, daily target constant |
+| `hmm_regime.py` | **Baum-Welch HMM** — 4-state Gaussian HMM (BULL/BEAR/VOLATILE/SIDEWAYS) fitted to WTI features via EM; outputs soft posteriors γ_t(i) for position sizing | Forward/backward math, N=4 states, D=4 features, log-space numerics |
 
 ---
 
@@ -41,6 +42,55 @@ trading system for WTI crude oil, Brent, RBOB, and ULSD.
 - Keep all dollar values in USD
 - Keep `q=r` when calling `black_scholes()` for futures (Black-76 convention)
 - Use `FUND_EQUITY_USD` from `risk_engine.py` as the single source of account size
+
+---
+
+## HMM Regime Engine (`hmm_regime.py`)
+
+### Baum-Welch Algorithm (ECE 417 / Hasegawa-Johnson, 2021)
+
+| Concept | Implementation |
+|---------|---------------|
+| Hidden states N=4 | BULL, BEAR, VOLATILE, SIDEWAYS |
+| Observation D=4 | daily_return%, rolling_vol%, rsi_norm, log_volume_norm |
+| Emission | Gaussian b_i(x) = N(x; μ_i, Σ_i) |
+| E-step | γ_t(i) = α_t(i)β_t(i) / Σ_k α_t(k)β_t(k) |
+| M-step | Re-estimate π, A, μ, Σ via weighted MLE |
+| Numerics | Log-space throughout (prevents underflow) |
+| Retraining | Every 63 bars (~quarterly) with `_RETRAIN_EVERY` |
+
+### HMM Position Size Multipliers
+
+| Regime | Multiplier | Rationale |
+|--------|-----------|-----------|
+| BULL | 0.8–1.0 (γ_BULL weighted) | High confidence trend → full Kelly |
+| BEAR | 0.8–1.0 (γ_BEAR weighted) | Clear downtrend → full short sizing |
+| VOLATILE | 0.25 | Crisis/OPEC shock → 75% size reduction |
+| SIDEWAYS | 0.50 | Range-bound → half size |
+
+### HMM Integration Points
+
+| File | HMM Usage |
+|------|-----------|
+| `signal_engine.py` | Replaces 50/200MA heuristic in `_long_term_trend_regime()` |
+| `vsa_agents.py` | Agent 1 (Macro Trend) uses `get_hmm_regime()` every 15 min |
+| `crew_agent.py` | `fetch_hmm_regime_context()` injected into Ingestion + Risk tasks |
+| `autonomous_agent.py` | `risk_monitor()` refreshes every 5 min; shown in `--status` |
+| `global_ecosystem.py` | ClaudeLeadershipAgent prompt enriched; VOLATILE blocks ML entries |
+
+### HMM Constraints for Claude Code
+
+#### NEVER DO:
+- Change N (number of states) without updating `OilRegime` enum and all integration points
+- Remove the `_RETRAIN_EVERY = 63` cache — retraining every bar would over-fit noise
+- Use HMM posteriors to directly set dollar position sizes — always multiply through Kelly
+- Bypass the `_HMM` guard — all 5 integration files have graceful fallback to MA heuristic
+
+#### ALWAYS DO:
+- Keep log-space forward/backward to prevent float underflow on long series
+- Add `1e-6 * np.eye(D)` covariance regularization in M-step (prevents singular Σ)
+- Return `RegimeResult` from `get_hmm_regime()` — callers depend on `.regime`, `.probabilities`, `.explanation`
+- Source `regime_size_multiplier()` from `hmm_regime.py` — do not re-implement in other modules
 
 ---
 

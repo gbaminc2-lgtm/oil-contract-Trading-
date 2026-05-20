@@ -68,6 +68,13 @@ try:
 except ImportError:
     _ENSEMBLE = False
 
+# ── Baum-Welch HMM regime (graceful fallback to legacy trend logic) ───────────
+try:
+    from hmm_regime import get_hmm_regime, regime_size_multiplier, OilRegime
+    _HMM = True
+except ImportError:
+    _HMM = False
+
 logging.basicConfig(
     level   = logging.INFO,
     format  = "%(asctime)s [%(levelname)s] %(message)s",
@@ -151,44 +158,79 @@ class SharedMarketState:
     Agents 1 and 2 write; Agent 3 reads; Agent 4 never reads this directly.
     account_balance is seeded from risk_engine.ACCOUNT_EQUITY_USD so that
     position sizing always reflects the single authoritative equity figure.
+    hmm_size_mult: Baum-Welch soft-posterior multiplier [0.0, 1.0] from Agent 1.
     """
-    trend_state:    str             = "FLAT"  # LONG_ONLY | SHORT_ONLY | FLAT
-    active_signal:  Optional[str]   = None    # SOS_SHARPSHOOTER | SOW_SHARPSHOOTER
-    signal_bar:     Optional[VSABar]= None
-    account_balance: float          = field(default_factory=lambda: ACCOUNT_EQUITY_USD)
+    trend_state:     str             = "FLAT"  # LONG_ONLY | SHORT_ONLY | FLAT
+    active_signal:   Optional[str]   = None    # SOS_SHARPSHOOTER | SOW_SHARPSHOOTER
+    signal_bar:      Optional[VSABar]= None
+    account_balance: float           = field(default_factory=lambda: ACCOUNT_EQUITY_USD)
+    hmm_size_mult:   float           = 1.0     # HMM regime-based position size scalar
 
 
 # ============================================================================
 # AGENT 1 — MACRO-TREND FILTER
 # ============================================================================
 
-async def macro_trend_agent(state: SharedMarketState) -> None:
-    """Scans 4H and Daily market structure every 15 minutes.
+async def macro_trend_agent(state: SharedMarketState,
+                           ticker: str = "CL=F") -> None:
+    """Scans Daily market structure every 15 minutes via Baum-Welch HMM.
 
-    Sets state.trend_state to one of LONG_ONLY | SHORT_ONLY | FLAT.
-    Agents 2 and 3 read this value; only Agent 1 writes it.
+    Primary path (when _HMM is True):
+      Fetches 1Y of daily WTI closes from yfinance, runs get_hmm_regime() to
+      obtain the Viterbi-decoded hidden state {BULL, BEAR, VOLATILE, SIDEWAYS}
+      and soft posteriors γ_t(i) from the Baum-Welch forward-backward pass.
 
-    Logic placeholder: replace the simulated_trend assignment below with a
-    real 4H/Daily OHLCV fetch (e.g. via yfinance or CME data feed) and a
-    200-EMA higher-highs / lower-lows check.
+      BULL     → state.trend_state = "LONG_ONLY"   (size_mult from γ_BULL)
+      BEAR     → state.trend_state = "SHORT_ONLY"  (size_mult from γ_BEAR)
+      VOLATILE → state.trend_state = "FLAT"         (size_mult = 0.25, crisis)
+      SIDEWAYS → state.trend_state = "FLAT"         (size_mult = 0.5)
 
+    Fallback (when _HMM is False or yfinance unavailable):
+      Keeps legacy LONG_ONLY bias (preserves original behaviour).
+
+    Agents 2 and 3 read trend_state; only Agent 1 writes it.
     Grimes Ch.5: trade in the direction of the dominant trend structure.
     """
+    import importlib
     refresh = VSA_THRESHOLDS["TREND_REFRESH_SEC"]
     while True:
         try:
-            logger.info("[Agent 1 | Trend] Fetching 4H and Daily market structure...")
+            logger.info("[Agent 1 | Trend] Fetching market structure via HMM...")
 
-            # ── API CALL PLACEHOLDER ─────────────────────────────────────────
-            # df_4h  = yf.download("CL=F", period="60d", interval="1h")
-            # ema200 = df_4h["Close"].ewm(span=200).mean()
-            # trending_up = df_4h["Close"].iloc[-1] > ema200.iloc[-1]
-            # state.trend_state = "LONG_ONLY" if trending_up else "SHORT_ONLY"
-            # ─────────────────────────────────────────────────────────────────
+            hmm_resolved = False
+            if _HMM:
+                try:
+                    yf_mod = importlib.import_module("yfinance")
+                    raw = yf_mod.download(ticker, period="1y", interval="1d",
+                                          progress=False, auto_adjust=True)
+                    if isinstance(raw.columns, __import__("pandas").MultiIndex):
+                        raw.columns = [c[0].lower() for c in raw.columns]
+                    else:
+                        raw.columns = [c.lower() for c in raw.columns]
+                    close_series = raw["close"].dropna()
+                    if len(close_series) >= 63:
+                        result = get_hmm_regime(ticker=ticker, close=close_series)
+                        mult   = regime_size_multiplier(result)
+                        state.hmm_size_mult = mult
+                        r = result.regime
+                        if r == OilRegime.BULL:
+                            state.trend_state = "LONG_ONLY"
+                        elif r == OilRegime.BEAR:
+                            state.trend_state = "SHORT_ONLY"
+                        else:  # VOLATILE or SIDEWAYS
+                            state.trend_state = "FLAT"
+                        logger.info(
+                            "[Agent 1 | Trend] HMM regime=%s bias=%s size_mult=%.2f | %s",
+                            r.value, state.trend_state, mult, result.explanation,
+                        )
+                        hmm_resolved = True
+                except Exception as hmm_exc:
+                    logger.warning("[Agent 1 | Trend] HMM fetch failed (%s) — using fallback", hmm_exc)
 
-            simulated_trend   = "LONG_ONLY"
-            state.trend_state = simulated_trend
-            logger.info("[Agent 1 | Trend] Global bias → %s", state.trend_state)
+            if not hmm_resolved:
+                state.trend_state  = "LONG_ONLY"
+                state.hmm_size_mult = 1.0
+                logger.info("[Agent 1 | Trend] Fallback bias → LONG_ONLY")
 
         except Exception as exc:
             logger.error("[Agent 1 | Trend] Error: %s", exc)
@@ -405,7 +447,11 @@ async def quant_risk_agent(
 
             # Use the live account balance from shared state (seeded from
             # ACCOUNT_EQUITY_USD in risk_engine.py via SharedMarketState).
-            total_usd_to_risk = state.account_balance * MAX_RISK_PER_TRADE_PCT
+            # HMM soft-posterior multiplier scales size by regime confidence:
+            #   BULL/BEAR → 0.8–1.0  | VOLATILE → 0.25  | SIDEWAYS → 0.5
+            total_usd_to_risk = (state.account_balance
+                                 * MAX_RISK_PER_TRADE_PCT
+                                 * state.hmm_size_mult)
             position_lots     = total_usd_to_risk / risk_per_lot
 
             logger.info(
@@ -428,9 +474,10 @@ async def quant_risk_agent(
                 "[Agent 4 | Risk] Risk $/lot   : $%.2f", risk_per_lot
             )
             logger.info(
-                "[Agent 4 | Risk] Capital @ Risk: $%.2f (%.1f%% of $%.0f)",
+                "[Agent 4 | Risk] Capital @ Risk: $%.2f (%.1f%% × HMM_mult=%.2f of $%.0f)",
                 total_usd_to_risk,
                 MAX_RISK_PER_TRADE_PCT * 100,
+                state.hmm_size_mult,
                 state.account_balance,
             )
 

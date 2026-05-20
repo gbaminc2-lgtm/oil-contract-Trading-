@@ -171,6 +171,16 @@ try:
 except ImportError:
     _SCIPY = False
 
+# ── Optional: Baum-Welch HMM (graceful fallback — agents use mock regime) ─────
+get_hmm_regime:       Any = None
+regime_size_multiplier: Any = None
+OilRegime:            Any = None
+try:
+    from hmm_regime import get_hmm_regime, regime_size_multiplier, OilRegime
+    _HMM = True
+except ImportError:
+    _HMM = False
+
 # =============================================================================
 # SECTION 1 — CONFIGURATION (all values from risk_engine, never hardcoded)
 # =============================================================================
@@ -535,6 +545,52 @@ def fetch_market_regime() -> str:
     except Exception as e:
         return f"Alpaca market feed error: {e}"
 
+
+def fetch_hmm_regime_context(ticker: str = "CL=F") -> str:
+    """Run Baum-Welch HMM on WTI daily closes and return a formatted regime context
+    string for use in CrewAI agent task descriptions.
+
+    Provides:
+      - Current hidden state (BULL / BEAR / VOLATILE / SIDEWAYS)
+      - Soft-posterior probabilities γ_t(i) for each regime
+      - Position size multiplier from regime_size_multiplier()
+      - Plain-English rationale from RegimeResult.explanation
+
+    Falls back to a static mock context if hmm_regime is unavailable.
+    """
+    if not _HMM:
+        return (
+            "HMM unavailable (hmm_regime not installed). "
+            "Mock regime: SIDEWAYS | P(BULL)=0.25 P(BEAR)=0.25 P(VOL)=0.25 P(SIDE)=0.25 "
+            "| size_mult=0.50. Use conservative sizing."
+        )
+    try:
+        import importlib
+        pd  = importlib.import_module("pandas")
+        yf  = importlib.import_module("yfinance")
+        raw = yf.download(ticker, period="1y", interval="1d",
+                          progress=False, auto_adjust=True)
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = [c[0].lower() for c in raw.columns]
+        else:
+            raw.columns = [c.lower() for c in raw.columns]
+        close = raw["close"].dropna()
+        if len(close) < 63:
+            return f"Insufficient history ({len(close)} bars < 63) for HMM. Use SIDEWAYS."
+        result = get_hmm_regime(ticker=ticker, close=close)
+        mult   = regime_size_multiplier(result)
+        probs  = result.probabilities
+        return (
+            f"HMM Market Regime: {result.regime.value} | "
+            f"P(BULL)={probs.get('BULL',0):.2f} "
+            f"P(BEAR)={probs.get('BEAR',0):.2f} "
+            f"P(VOLATILE)={probs.get('VOLATILE',0):.2f} "
+            f"P(SIDEWAYS)={probs.get('SIDEWAYS',0):.2f} | "
+            f"Kelly_size_mult={mult:.2f} | {result.explanation}"
+        )
+    except Exception as e:
+        return f"HMM regime fetch error: {e}. Assume SIDEWAYS, size_mult=0.5."
+
 # =============================================================================
 # SECTION 7 — ALPACA PAPER EXECUTION
 # evaluate_trade() gate MUST pass before this is called.
@@ -591,6 +647,7 @@ def _build_crew(
     greeks: Dict[str, float],
     uso_price: float,
     ensemble_summary: str = "",
+    hmm_regime_ctx: str = "",
 ) -> Any:
     llm = _get_llm()
 
@@ -703,11 +760,13 @@ def _build_crew(
         description=(
             "PRIMARY OBJECTIVE: Determine if WTI crude oil is at a BUY LOW opportunity "
             "or a SELL HIGH opportunity RIGHT NOW. Use all data below.\n\n"
+            f"**Baum-Welch HMM Market Regime (4-state: BULL/BEAR/VOLATILE/SIDEWAYS):**\n"
+            f"{hmm_regime_ctx}\n\n"
             f"**Multi-Factor Signal Engine Assessment (Bollinger+RSI+Momentum+Carry):**\n"
             f"{ensemble_summary}\n\n"
             f"**EIA Petroleum Storage (live):**\n{live_eia}\n\n"
             f"**Global Macro Headlines (RSS):**\n{live_rss}\n\n"
-            f"**Alpaca Market Regime:**\n{market_regime}\n\n"
+            f"**Alpaca Market Regime (USO/UNG proxy):**\n{market_regime}\n\n"
             f"**Institutional Knowledge Context:**\n{knowledge_ctx[:2_000]}\n\n"
             "Answer these questions:\n"
             "  1. Is price at a STATISTICAL LOW (near lower Bollinger, RSI<45) → BUY OPPORTUNITY?\n"
@@ -762,12 +821,14 @@ def _build_crew(
             f"**Max daily loss:** ${MAX_DAILY_LOSS_USD:.2f}\n"
             "**Greek limits:** Max delta ±20 | Max vega ±$500/1%IV\n"
             "**Min DTE:** 21 days (Bittman constraint)\n\n"
+            f"**HMM Regime Context:**\n{hmm_regime_ctx}\n\n"
             "**Checklist:**\n"
             "  [ ] Defined-risk only (no naked shorts) — REJECT immediately if undefined risk\n"
             "  [ ] (Strike width − net premium) × multiplier ≤ max risk/trade\n"
             "  [ ] Capital allocation ≤ 5% portfolio for spread structures\n"
             "  [ ] DTE ≥ 21 on all legs\n"
-            "  [ ] Delta within ±20 | Vega within ±$500/1%IV\n\n"
+            "  [ ] Delta within ±20 | Vega within ±$500/1%IV\n"
+            "  [ ] Apply HMM Kelly_size_mult to position size (VOLATILE regime → 0.25×, SIDEWAYS → 0.50×)\n\n"
             "Output format: Start with APPROVED or REJECTED (capitalized), then details."
         ),
         expected_output=(
@@ -841,6 +902,10 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
     live_eia      = fetch_eia_data()
     live_rss      = fetch_rss_headlines()
     market_regime = fetch_market_regime()
+
+    # — Baum-Welch HMM regime context (supersedes Alpaca USO/UNG heuristic)
+    hmm_regime_ctx = fetch_hmm_regime_context("CL=F")
+    logger.info("[CrewAgent] HMM: %s", hmm_regime_ctx[:120])
 
     # — Signal engine: buy-low/sell-high assessment for Agent 1 context
     price_assessment = "UNKNOWN"
@@ -922,7 +987,8 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
     loop = asyncio.get_event_loop()
     result_str = ""
     try:
-        crew = _build_crew(live_eia, live_rss, market_regime, knowledge_ctx, greeks, uso_price, ensemble_summary)
+        crew = _build_crew(live_eia, live_rss, market_regime, knowledge_ctx, greeks,
+                           uso_price, ensemble_summary, hmm_regime_ctx)
         result_str = str(await loop.run_in_executor(None, crew.kickoff))
     except Exception as e:
         result_str = f"Crew execution error: {e}"

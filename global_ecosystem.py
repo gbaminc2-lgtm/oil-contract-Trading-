@@ -131,6 +131,20 @@ try:
 except ImportError:
     _STRAT = False
 
+# ── Baum-Welch HMM regime (enriches Claude prompt + ML signal gate) ───────────
+_get_hmm_regime:         object = None
+_regime_size_multiplier: object = None
+_OilRegime:              object = None
+try:
+    from hmm_regime import (
+        get_hmm_regime     as _get_hmm_regime,
+        regime_size_multiplier as _regime_size_multiplier,
+        OilRegime          as _OilRegime,
+    )
+    _HMM = True
+except ImportError:
+    _HMM = False
+
 logging.basicConfig(
     level  = logging.INFO,
     format = "%(asctime)s [%(levelname)-8s] %(name)-24s | %(message)s",
@@ -237,6 +251,10 @@ class SharedEcosystemMemoryBus:
     sentiment_score:             float = 0.0
     target_volatility_prediction:float = 0.0
     current_risk_cushion_pct:    float = 100.0
+
+    # Baum-Welch HMM regime (written by ClaudeLeadershipAgent; read by MLQuantAgent)
+    hmm_regime:     str   = "UNKNOWN"   # BULL | BEAR | VOLATILE | SIDEWAYS
+    hmm_size_mult:  float = 1.0         # position size scalar from soft posteriors γ_t(i)
 
     # FX rates (updated by Agent 5 forex sweeper)
     usd_to_cny:  float = 7.24
@@ -430,11 +448,53 @@ class ClaudeLeadershipAgent:
         self.client = Anthropic(api_key=api_key) if (_ANTHROPIC and api_key) else None
 
     def re_evaluate_macro_regime(self, raw_context: dict) -> None:
+        # ── Baum-Welch HMM regime (enriches context before Claude call) ──────
+        hmm_ctx_str = "HMM unavailable"
+        if _HMM:
+            try:
+                import yfinance as _yf
+                raw = _yf.download("CL=F", period="1y", interval="1d",
+                                   progress=False, auto_adjust=True)
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = [c[0].lower() for c in raw.columns]
+                else:
+                    raw.columns = [c.lower() for c in raw.columns]
+                close_s = raw["close"].dropna()
+                if len(close_s) >= 63:
+                    hmm_result  = _get_hmm_regime(ticker="CL=F", close=close_s)  # type: ignore[call-arg]
+                    hmm_mult    = _regime_size_multiplier(hmm_result)             # type: ignore[call-arg]
+                    global_memory.hmm_regime    = hmm_result.regime.value
+                    global_memory.hmm_size_mult = hmm_mult
+                    probs = hmm_result.probabilities
+                    hmm_ctx_str = (
+                        f"HMM state={hmm_result.regime.value} "
+                        f"P(BULL)={probs.get('BULL',0):.2f} "
+                        f"P(BEAR)={probs.get('BEAR',0):.2f} "
+                        f"P(VOL)={probs.get('VOLATILE',0):.2f} "
+                        f"P(SIDE)={probs.get('SIDEWAYS',0):.2f} "
+                        f"size_mult={hmm_mult:.2f} | {hmm_result.explanation}"
+                    )
+                    logger.info("[Leadership|HMM] %s", hmm_ctx_str)
+            except Exception as hmm_exc:
+                logger.debug("[Leadership|HMM] Skipped: %s", hmm_exc)
+
+        raw_context["hmm_regime"] = hmm_ctx_str
+
         if self.client is None:
-            # Offline fallback — moderate bullish default
-            global_memory.macro_bias     = "MODERATE_BULLISH"
-            global_memory.sentiment_score = 0.45
-            logger.info("[Leadership] Offline mode — default MODERATE_BULLISH.")
+            # Offline fallback — infer bias from HMM state
+            if global_memory.hmm_regime == "BULL":
+                global_memory.macro_bias      = "MODERATE_BULLISH"
+                global_memory.sentiment_score = 0.55
+            elif global_memory.hmm_regime == "BEAR":
+                global_memory.macro_bias      = "MODERATE_BEARISH"
+                global_memory.sentiment_score = -0.55
+            elif global_memory.hmm_regime == "VOLATILE":
+                global_memory.macro_bias      = "NEUTRAL"
+                global_memory.sentiment_score = 0.0
+            else:
+                global_memory.macro_bias      = "MODERATE_BULLISH"
+                global_memory.sentiment_score = 0.45
+            logger.info("[Leadership] Offline — HMM-inferred bias=%s", global_memory.macro_bias)
             return
 
         try:
@@ -445,8 +505,9 @@ class ClaudeLeadershipAgent:
                 tool_choice= {"type": "any"},
                 system     = (
                     "You are Chief Global Energy Fund Overseer. "
-                    "Analyse the provided macro context and call "
-                    "shift_ecosystem_regime to set the current regime bias."
+                    "A Baum-Welch Hidden Markov Model has pre-classified the WTI market regime. "
+                    "Use the HMM state and posteriors to anchor your bias, then refine with "
+                    "macro context. Call shift_ecosystem_regime to set the current regime bias."
                 ),
                 messages   = [{"role": "user", "content": json.dumps(raw_context)}],
             )
@@ -562,8 +623,9 @@ class HighFrequencyMLQuantAgent:
             logger.error("[QuantAgent] Unknown registry key: %s", registry_key)
             return
 
-        # ── Currency normalisation ────────────────────────────────────────────
-        allocation = ACCOUNT_EQUITY_USD * 0.80   # 20% safety buffer
+        # ── Currency normalisation (HMM size_mult scales allocation) ─────────
+        # SIDEWAYS → ×0.5 | BULL/BEAR → ×0.8–1.0 | VOLATILE already blocked above
+        allocation = ACCOUNT_EQUITY_USD * 0.80 * global_memory.hmm_size_mult
         if config["currency"] == "CNY":
             allocation *= global_memory.usd_to_cny
         elif config["currency"] == "JPY":
@@ -601,16 +663,26 @@ class HighFrequencyMLQuantAgent:
         prices = [b.close for b in bars]
         slope, _ = self.process_signals(prices)
 
-        # ── Macro bias gate ───────────────────────────────────────────────────
+        # ── Macro bias gate (Claude regime + HMM regime combined) ────────────
         bullish = global_memory.macro_bias in ("AGGRESSIVE_BULLISH", "MODERATE_BULLISH")
         bearish = global_memory.macro_bias in ("AGGRESSIVE_BEARISH", "MODERATE_BEARISH")
+
+        # HMM VOLATILE crisis regime: suppress ALL new entries regardless of bias
+        if global_memory.hmm_regime == "VOLATILE":
+            logger.info(
+                "[QuantAgent] HMM=VOLATILE crisis regime — no new entries "
+                "(size_mult=%.2f). bias=%s slope=%.4f",
+                global_memory.hmm_size_mult, global_memory.macro_bias, slope,
+            )
+            return
 
         if bullish and slope > 0:
             side = "BUY"
         elif bearish and slope < 0:
             side = "SELL"
         else:
-            logger.debug("[QuantAgent] No signal — bias=%s slope=%.4f", global_memory.macro_bias, slope)
+            logger.debug("[QuantAgent] No signal — HMM=%s bias=%s slope=%.4f",
+                         global_memory.hmm_regime, global_memory.macro_bias, slope)
             return
 
         # ── evaluate_trade() risk gate (CLAUDE.md constraint) ─────────────────

@@ -70,6 +70,13 @@ try:
 except ImportError:
     _SKL = False
 
+# ── HMM regime (Baum-Welch, graceful fallback to 50/200MA heuristic) ──────────
+try:
+    from hmm_regime import get_hmm_regime, regime_size_multiplier, OilRegime, RegimeResult
+    _HMM = True
+except ImportError:
+    _HMM = False
+
 
 # ============================================================================
 # 1. SIGNAL TYPES
@@ -483,47 +490,76 @@ def _vol_regime_score(close: pd.Series,
 # 5. ENSEMBLE SIGNAL GENERATOR
 # ============================================================================
 
-def _long_term_trend_regime(close: pd.Series) -> Tuple[str, str]:
+def _long_term_trend_regime(close: pd.Series,
+                            ticker: str = "CL=F",
+                            volume: Optional[pd.Series] = None,
+                            ) -> Tuple[str, str, float]:
     """
-    Long-term trend regime filter using 50-day and 200-day moving averages.
+    Long-term trend regime filter.
 
-    This is the most important filter in the system.
-    It answers: is the PRIMARY trend UP or DOWN right now?
+    Primary path: Baum-Welch Gaussian HMM (hmm_regime.py) with 4 hidden states
+    (BULL, BEAR, VOLATILE, SIDEWAYS) fitted to multivariate price features.
+    Returns soft posterior γ_t(i) for probabilistic position sizing.
 
-    Rule (from Grimes — Art & Science of Technical Analysis):
-      50MA > 200MA → PRIMARY UPTREND   → ONLY buy at lows (never sell short)
-      50MA < 200MA → PRIMARY DOWNTREND → ONLY sell at highs (never buy long)
-      50MA ≈ 200MA → SIDEWAYS          → reduce size, both directions allowed
+    Fallback: 50MA / 200MA heuristic (used when _HMM is False or data < 63 bars).
 
-    Why this fixes the 12% win rate:
-      Buying at a Bollinger low in a downtrend = catching a falling knife.
-      Buying at a Bollinger low in an uptrend  = buying a temporary dip.
-      Same entry, completely different outcome. Regime is everything.
-
-    Source: Grimes Ch.5 — "The trend is the single most important context factor."
+    Returns: (regime_str, explanation, size_multiplier)
+      regime_str      — "UPTREND" | "DOWNTREND" | "SIDEWAYS" | "VOLATILE"
+      explanation     — human-readable audit string
+      size_multiplier — [0.0, 1.0] Kelly position sizing scalar from HMM posteriors
     """
+    # ── HMM primary path ──────────────────────────────────────────────────────
+    if _HMM and len(close) >= 63:
+        try:
+            result: RegimeResult = get_hmm_regime(ticker=ticker, close=close, volume=volume)
+            multiplier = regime_size_multiplier(result)
+            r = result.regime
+            # Map OilRegime → legacy regime strings the ensemble gate understands
+            if r == OilRegime.BULL:
+                regime_str = "UPTREND"
+            elif r == OilRegime.BEAR:
+                regime_str = "DOWNTREND"
+            elif r == OilRegime.VOLATILE:
+                regime_str = "VOLATILE"
+            else:
+                regime_str = "SIDEWAYS"
+            expl = (
+                f"HMM Regime: {r.value} | "
+                f"P(BULL)={result.probabilities.get('BULL',0):.2f} "
+                f"P(BEAR)={result.probabilities.get('BEAR',0):.2f} "
+                f"P(VOL)={result.probabilities.get('VOLATILE',0):.2f} "
+                f"P(SIDE)={result.probabilities.get('SIDEWAYS',0):.2f} | "
+                f"size_mult={multiplier:.2f} | {result.explanation}"
+            )
+            return regime_str, expl, multiplier
+        except Exception as exc:
+            logger.warning("HMM regime failed (%s) — falling back to 50/200MA", exc)
+
+    # ── 50/200MA fallback ─────────────────────────────────────────────────────
     if len(close) < 200:
-        return "UNKNOWN", "Insufficient history for 200-day MA"
+        return "UNKNOWN", "Insufficient history for 200-day MA", 0.5
 
     ma50  = float(close.tail(50).mean())
     ma200 = float(close.tail(200).mean())
-    price = float(close.iloc[-1])
     spread_pct = (ma50 - ma200) / ma200 * 100
 
     if spread_pct > 1.0:
-        regime = "UPTREND"
-        expl   = (f"Regime: PRIMARY UPTREND (50MA={ma50:.2f} > 200MA={ma200:.2f}, "
-                  f"spread=+{spread_pct:.1f}%) → BUY LOWS ONLY, no short selling")
+        regime_str = "UPTREND"
+        expl = (f"Regime: PRIMARY UPTREND (50MA={ma50:.2f} > 200MA={ma200:.2f}, "
+                f"spread=+{spread_pct:.1f}%) → BUY LOWS ONLY [MA fallback]")
+        multiplier = 1.0
     elif spread_pct < -1.0:
-        regime = "DOWNTREND"
-        expl   = (f"Regime: PRIMARY DOWNTREND (50MA={ma50:.2f} < 200MA={ma200:.2f}, "
-                  f"spread={spread_pct:.1f}%) → SELL HIGHS ONLY, no long buying")
+        regime_str = "DOWNTREND"
+        expl = (f"Regime: PRIMARY DOWNTREND (50MA={ma50:.2f} < 200MA={ma200:.2f}, "
+                f"spread={spread_pct:.1f}%) → SELL HIGHS ONLY [MA fallback]")
+        multiplier = 1.0
     else:
-        regime = "SIDEWAYS"
-        expl   = (f"Regime: SIDEWAYS (50MA={ma50:.2f} ≈ 200MA={ma200:.2f}, "
-                  f"spread={spread_pct:.1f}%) → reduced size, both directions")
+        regime_str = "SIDEWAYS"
+        expl = (f"Regime: SIDEWAYS (50MA={ma50:.2f} ≈ 200MA={ma200:.2f}, "
+                f"spread={spread_pct:.1f}%) → reduced size [MA fallback]")
+        multiplier = 0.5
 
-    return regime, expl
+    return regime_str, expl, multiplier
 
 
 def generate_ensemble_signal(ticker: str = "CL=F",
@@ -548,8 +584,8 @@ def generate_ensemble_signal(ticker: str = "CL=F",
         close = close.iloc[:, 0]
     close = close.astype(float).dropna()
 
-    # Long-term trend regime (most important filter — fixes 12% win rate)
-    lt_regime, lt_expl = _long_term_trend_regime(close)
+    # Long-term trend regime via Baum-Welch HMM (falls back to 50/200MA)
+    lt_regime, lt_expl, hmm_size_mult = _long_term_trend_regime(close, ticker=ticker)
 
     # Factor scores
     val_score,   val_expl    = _value_entry_score(close)
@@ -577,16 +613,19 @@ def generate_ensemble_signal(ticker: str = "CL=F",
 
     ensemble = float(np.clip(ensemble, -1, 1))
 
-    # Regime gate: primary trend overrides ensemble direction
-    # UPTREND   → only allow BUY signals (buying lows in uptrend = high win rate)
-    # DOWNTREND → only allow SELL signals (selling highs in downtrend = high win rate)
-    # SIDEWAYS  → allow both but halve the score (lower conviction = smaller size)
+    # Regime gate: HMM state overrides ensemble direction
+    # UPTREND   → only allow BUY  (buying lows in uptrend = high win rate)
+    # DOWNTREND → only allow SELL (selling highs in downtrend = high win rate)
+    # VOLATILE  → halve score; allow both directions (crisis regime, reduced size)
+    # SIDEWAYS  → halve score; allow both directions (trendless, lower conviction)
     if lt_regime == "UPTREND" and ensemble < 0:
-        ensemble = 0.0   # suppress SELL signals in uptrend — don't fight the trend
+        ensemble = 0.0
     elif lt_regime == "DOWNTREND" and ensemble > 0:
-        ensemble = 0.0   # suppress BUY signals in downtrend — don't fight the trend
-    elif lt_regime == "SIDEWAYS":
-        ensemble *= 0.5  # reduce conviction in trendless market
+        ensemble = 0.0
+    elif lt_regime in ("SIDEWAYS", "VOLATILE", "UNKNOWN"):
+        ensemble *= 0.5  # reduce conviction; HMM size_mult handles dollar sizing
+    # Apply HMM soft-posterior size multiplier to score magnitude
+    ensemble *= hmm_size_mult
 
     # Direction
     if ensemble >= SIGNAL_THRESHOLD_STRONG:
@@ -622,7 +661,8 @@ def generate_ensemble_signal(ticker: str = "CL=F",
     explanation = (
         f"[{ticker}] {direction.value} | {strength.value} | "
         f"agreement: {agreement}\n  "
-        f"score={ensemble:+.3f} | confidence={confidence*100:.0f}%\n"
+        f"score={ensemble:+.3f} | confidence={confidence*100:.0f}% | "
+        f"HMM_size_mult={hmm_size_mult:.2f}\n"
         f"  Regime: {lt_expl}\n"
         f"  Dominant factor: {dominant.name.upper()} ({dominant.raw_score:+.2f})\n"
         f"  → {dominant.explanation}\n"

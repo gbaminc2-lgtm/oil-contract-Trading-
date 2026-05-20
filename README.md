@@ -217,6 +217,86 @@ Step 10: Session summary
 
 ---
 
+## Baum-Welch HMM Regime Engine (`hmm_regime.py`)
+
+The system uses a **Gaussian Hidden Markov Model** trained via the Baum-Welch EM algorithm
+(Hasegawa-Johnson, ECE 417 Lecture 15) to classify the WTI crude oil market into 4 hidden regimes.
+This replaces the legacy 50MA/200MA heuristic across every agent in the pipeline.
+
+### Mathematical Framework
+
+```
+Hidden states  q_t ∈ {BULL, BEAR, VOLATILE, SIDEWAYS}        N = 4
+Observations   x_t = [daily_return%, rolling_vol%, rsi_norm, log_vol_norm]  D = 4
+Emission       b_i(x) = N(x; μ_i, Σ_i)   ← Gaussian pdf per state
+```
+
+**Forward algorithm** (log-space):
+```
+α_1(i)  = π_i · b_i(x_1)
+α_t(j)  = [Σ_i α_{t-1}(i) · a_ij] · b_j(x_t)
+```
+
+**E-step posteriors**:
+```
+γ_t(i)    = α_t(i) · β_t(i) / Σ_k α_t(k) · β_t(k)     ← state occupation
+ξ_t(i,j)  = α_t(i) · a_ij · b_j(x_{t+1}) · β_{t+1}(j) / p(X|Λ)   ← transition
+```
+
+**Baum-Welch M-step**:
+```
+π'_i  = γ_1(i)
+a'_ij = Σ_t ξ_t(i,j) / Σ_j Σ_t ξ_t(i,j)
+μ'_i  = Σ_t γ_t(i) x_t / Σ_t γ_t(i)
+Σ'_i  = Σ_t γ_t(i)(x_t − μ'_i)(x_t − μ'_i)ᵀ / Σ_t γ_t(i) + εI
+```
+
+### Regime States & Position Sizing
+
+| State | Economic Meaning | Kelly Size Multiplier |
+|-------|----------------|-----------------------|
+| **BULL** | Supply tightening, backwardation, positive returns | 0.8–1.0 (γ_BULL weighted) |
+| **BEAR** | Oversupply, contango, negative returns | 0.8–1.0 (γ_BEAR weighted) |
+| **VOLATILE** | Crisis — OPEC shock / geopolitical event, high vol | 0.25 (75% size reduction) |
+| **SIDEWAYS** | Balanced demand/supply, range-bound, low vol | 0.50 (half size) |
+
+### Why HMM Beats Simple Moving Averages
+
+1. **Regime persistence** — the transition matrix A captures that markets don't jump between states instantly
+2. **Soft assignment** — γ_t(i) posteriors give probability weights for Kelly position sizing
+3. **Multivariate** — D=4 features capture correlated price+volume+momentum structure
+4. **Data-driven** — parameters optimised from actual WTI data via EM (no hand-tuned thresholds)
+5. **Mathematically guaranteed** — Baum-Welch monotonically improves p(X|Λ) each iteration
+
+### Integration Across All Agents
+
+```
+hmm_regime.py
+  ├── signal_engine.py      → replaces _long_term_trend_regime() (50/200MA heuristic)
+  ├── vsa_agents.py         → Agent 1 (Macro Trend) uses get_hmm_regime() every 15 min
+  ├── crew_agent.py         → fetch_hmm_regime_context() fed to IngestionOfficer + RiskOfficer
+  ├── autonomous_agent.py   → risk_monitor() refreshes every 5 min; shown in --status
+  └── global_ecosystem.py   → ClaudeLeadershipAgent prompt enriched; VOLATILE blocks ML entries
+```
+
+### Quick Usage
+
+```python
+from hmm_regime import get_hmm_regime, regime_size_multiplier
+
+# Fit and classify current WTI regime
+result = get_hmm_regime(ticker="CL=F", close=wti_close_series)
+
+print(result.regime)          # OilRegime.BULL
+print(result.probabilities)   # {'BULL': 0.78, 'BEAR': 0.12, 'VOLATILE': 0.06, 'SIDEWAYS': 0.04}
+print(result.explanation)     # "BULL: strong carry & positive return (P=0.78)"
+
+# Kelly position size multiplier
+mult = regime_size_multiplier(result)   # 0.87
+```
+
+---
+
 ## CI/CD Pipeline (GitHub Actions)
 
 | Job | Trigger | Description |

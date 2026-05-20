@@ -135,6 +135,16 @@ try:
 except ImportError:
     _PIPELINE = False
 
+# ── Baum-Welch HMM regime (displayed in status + used by risk_monitor) ────────
+get_hmm_regime:         Any = None
+regime_size_multiplier: Any = None
+OilRegime:              Any = None
+try:
+    from hmm_regime import get_hmm_regime, regime_size_multiplier, OilRegime
+    _HMM = True
+except ImportError:
+    _HMM = False
+
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -236,6 +246,10 @@ class AutoSession:
     agents_running:     List[str]      = field(default_factory=list)
     errors_today:       int            = 0
 
+    # HMM regime (updated by risk_monitor every cycle)
+    hmm_regime:         str            = "UNKNOWN"
+    hmm_size_mult:      float          = 1.0
+
     def record_pnl(self, pnl: float, source: str = "unknown") -> None:
         self.total_realized_pnl += pnl
         if source == "micro":
@@ -256,6 +270,7 @@ class AutoSession:
     def summary_line(self) -> str:
         return (
             f"[Session {self.date}] Phase={self.phase.value} | "
+            f"HMM={self.hmm_regime}(×{self.hmm_size_mult:.2f}) | "
             f"P&L=${self.total_realized_pnl:+,.2f} | "
             f"Target=${DAILY_TARGET_USD:,.0f} | LossLimit=${MAX_DAILY_LOSS_USD:,.0f} | "
             f"Approved={self.approved_signals} | Flat={self.flat_for_day}"
@@ -282,10 +297,41 @@ async def risk_monitor(session: AutoSession, check_interval: float = 10.0) -> No
     It must be independent of the signal generators.
     """
     logger.info("[RiskMonitor] Started — checking every %.0fs", check_interval)
+    _hmm_refresh_counter = 0
     while True:
         try:
             session.risk_checks += 1
             session.last_heartbeat = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
+
+            # ── Baum-Welch HMM regime refresh (every ~5 min = 30 × 10s) ─────
+            _hmm_refresh_counter += 1
+            if _HMM and _hmm_refresh_counter % 30 == 1:
+                try:
+                    import importlib
+                    pd_mod = importlib.import_module("pandas")
+                    yf_mod = importlib.import_module("yfinance")
+                    raw = yf_mod.download("CL=F", period="1y", interval="1d",
+                                          progress=False, auto_adjust=True)
+                    if isinstance(raw.columns, pd_mod.MultiIndex):
+                        raw.columns = [c[0].lower() for c in raw.columns]
+                    else:
+                        raw.columns = [c.lower() for c in raw.columns]
+                    close_s = raw["close"].dropna()
+                    if len(close_s) >= 63:
+                        result = get_hmm_regime(ticker="CL=F", close=close_s)
+                        session.hmm_regime    = result.regime.value
+                        session.hmm_size_mult = regime_size_multiplier(result)
+                        logger.info("[RiskMonitor|HMM] %s size_mult=%.2f | %s",
+                                    session.hmm_regime, session.hmm_size_mult,
+                                    result.explanation)
+                        # VOLATILE crisis regime: warn loudly (size already reduced by HMM)
+                        if session.hmm_regime == "VOLATILE" and not session.flat_for_day:
+                            logger.warning(
+                                "[RiskMonitor|HMM] VOLATILE REGIME — crisis conditions. "
+                                "Kelly size_mult=%.2f applied by all agents.", session.hmm_size_mult
+                            )
+                except Exception as hmm_exc:
+                    logger.debug("[RiskMonitor|HMM] Refresh skipped: %s", hmm_exc)
 
             halt_reason = session.check_limits()
             if halt_reason and not session.flat_for_day:
@@ -964,6 +1010,33 @@ def print_status() -> None:
     print(f"  Risk Engine  : {'READY' if _RISK       else 'UNAVAILABLE (install risk_engine.py)'}")
     print(f"  Ecosystem    : {'READY' if _ECOSYSTEM  else 'UNAVAILABLE (install global_ecosystem.py)'}")
     print(f"  CrewAI Team  : {'READY' if _CREW       else 'UNAVAILABLE (pip install crewai)'}")
+    print(f"  HMM Regime   : {'READY' if _HMM        else 'UNAVAILABLE (install hmm_regime.py)'}")
+    print("─" * 70)
+    # Live HMM regime snapshot
+    if _HMM:
+        try:
+            import importlib
+            pd_mod = importlib.import_module("pandas")
+            yf_mod = importlib.import_module("yfinance")
+            raw = yf_mod.download("CL=F", period="1y", interval="1d",
+                                  progress=False, auto_adjust=True)
+            if isinstance(raw.columns, pd_mod.MultiIndex):
+                raw.columns = [c[0].lower() for c in raw.columns]
+            else:
+                raw.columns = [c.lower() for c in raw.columns]
+            close_s = raw["close"].dropna()
+            if len(close_s) >= 63:
+                result = get_hmm_regime(ticker="CL=F", close=close_s)
+                mult   = regime_size_multiplier(result)
+                probs  = result.probabilities
+                print(f"  HMM State    : {result.regime.value} (size_mult={mult:.2f})")
+                print(f"  P(BULL)={probs.get('BULL',0):.2f}  "
+                      f"P(BEAR)={probs.get('BEAR',0):.2f}  "
+                      f"P(VOLATILE)={probs.get('VOLATILE',0):.2f}  "
+                      f"P(SIDEWAYS)={probs.get('SIDEWAYS',0):.2f}")
+                print(f"  Rationale    : {result.explanation[:80]}")
+        except Exception as hmm_e:
+            print(f"  HMM State    : (unavailable — {hmm_e})")
     print("─" * 70)
     log_files = sorted(LOG_DIR.glob("session_*.json"))
     print(f"  Session logs : {len(log_files)} archived  →  {LOG_DIR}/")
