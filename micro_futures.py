@@ -618,20 +618,27 @@ async def micro_futures_agent(
 if _BT:
     class MicroEnergyStrategy(bt.Strategy):
         """
-        Dual-SMA crossover for Micro Energy futures — backtrader edition.
+        Momentum + Buy-Low/Sell-High backtest strategy — backtrader edition.
 
-        Cerebro setup:
-            multiplier = bbl_per_lot  (100 for MCL, 500 for QM)
-            margin     = initial margin per contract
-            commission = 0 (set separately via addcommissioninfo)
+        Entry rules (buy low in uptrend / sell high in downtrend):
+          LONG:  fast_ma > slow_ma (uptrend) + price <= lower Bollinger + RSI < 45
+          SHORT: fast_ma < slow_ma (downtrend) + price >= upper Bollinger + RSI > 55
 
-        Data feed: bt.feeds.GenericCSVData or bt.feeds.YahooFinanceData.
+        Exit rules (the other side of the trade):
+          Close LONG:  price >= upper Bollinger OR RSI > 65 (sold high)
+          Close SHORT: price <= lower Bollinger OR RSI < 35 (bought back low)
+          Hard stop: 0.5% from entry in either direction.
+
+        This eliminates chasing — you never buy at a high or sell at a low.
         """
         params = (
             ("fast_period",  10),
             ("slow_period",  30),
+            ("bb_period",    20),
+            ("bb_devfactor", 2.0),
+            ("rsi_period",   14),
             ("daily_target", 5_000.0),
-            ("stop_pct",     0.005),     # 0.5% stop from entry
+            ("stop_pct",     0.005),
             ("instrument",   "MCL"),
         )
 
@@ -641,13 +648,20 @@ if _BT:
             self.entry_px  = None
             self.stop_px   = None
 
-            self.fast_ma = bt.indicators.SimpleMovingAverage(
+            self.fast_ma   = bt.indicators.SimpleMovingAverage(
                 self.datas[0], period=self.params.fast_period
             )
-            self.slow_ma = bt.indicators.SimpleMovingAverage(
+            self.slow_ma   = bt.indicators.SimpleMovingAverage(
                 self.datas[0], period=self.params.slow_period
             )
-            self.crossover = bt.indicators.CrossOver(self.fast_ma, self.slow_ma)
+            self.bb        = bt.indicators.BollingerBands(
+                self.datas[0],
+                period    = self.params.bb_period,
+                devfactor = self.params.bb_devfactor,
+            )
+            self.rsi       = bt.indicators.RSI(
+                self.datas[0], period=self.params.rsi_period
+            )
 
             self._daily_pnl    = 0.0
             self._last_date    = None
@@ -711,28 +725,49 @@ if _BT:
                 daily_target=self.params.daily_target,
             )
 
-            # Entry
+            uptrend   = self.fast_ma[0] > self.slow_ma[0]
+            downtrend = self.fast_ma[0] < self.slow_ma[0]
+            bb_low    = self.bb.bot[0]
+            bb_high   = self.bb.top[0]
+            rsi_val   = self.rsi[0]
+
+            # Entry: buy at the LOW in an uptrend / sell at the HIGH in a downtrend
             if not self.position:
-                if self.crossover > 0:   # golden cross
-                    self.log(f"BUY CREATE | close={close:.3f} lots={lots}")
-                    self.order = self.buy(size=lots)
+                if uptrend and close <= bb_low * 1.002 and rsi_val < 45:
+                    self.log(
+                        f"BUY LOW | close={close:.3f} bb_low={bb_low:.3f} "
+                        f"RSI={rsi_val:.1f} (buy low in uptrend)"
+                    )
+                    self.order    = self.buy(size=lots)
                     self.entry_px = close
                     self.stop_px  = close - stop_dist
 
-                elif self.crossover < 0:   # death cross
-                    self.log(f"SELL CREATE | close={close:.3f} lots={lots}")
-                    self.order = self.sell(size=lots)
+                elif downtrend and close >= bb_high * 0.998 and rsi_val > 55:
+                    self.log(
+                        f"SELL HIGH | close={close:.3f} bb_high={bb_high:.3f} "
+                        f"RSI={rsi_val:.1f} (sell high in downtrend)"
+                    )
+                    self.order    = self.sell(size=lots)
                     self.entry_px = close
                     self.stop_px  = close + stop_dist
 
-            # Exit on reverse signal
+            # Exit: sell high on longs, buy back low on shorts
             else:
-                long_pos = self.position.size > 0
-                if long_pos and self.crossover < 0:
-                    self.log(f"CLOSE LONG | close={close:.3f}")
+                long_pos  = self.position.size > 0
+                stop_hit  = (long_pos  and close <= self.stop_px) or \
+                            (not long_pos and close >= self.stop_px)
+
+                sell_high = long_pos  and (close >= bb_high * 0.998 or rsi_val > 65)
+                buy_low   = not long_pos and (close <= bb_low * 1.002 or rsi_val < 35)
+
+                if stop_hit:
+                    self.log(f"STOP HIT | close={close:.3f} stop={self.stop_px:.3f}")
                     self.order = self.close()
-                elif not long_pos and self.crossover > 0:
-                    self.log(f"CLOSE SHORT | close={close:.3f}")
+                elif sell_high:
+                    self.log(f"SELL HIGH (exit long) | close={close:.3f} RSI={rsi_val:.1f}")
+                    self.order = self.close()
+                elif buy_low:
+                    self.log(f"BUY LOW (cover short) | close={close:.3f} RSI={rsi_val:.1f}")
                     self.order = self.close()
 
 
