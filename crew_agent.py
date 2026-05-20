@@ -561,22 +561,31 @@ def _build_crew(
     knowledge_ctx: str,
     greeks: Dict[str, float],
     uso_price: float,
+    ensemble_summary: str = "",
 ) -> "Crew":
     llm = _get_llm()
 
     # ── Agent 1: Ingestion Officer ────────────────────────────────────────────
     ingestion_officer = Agent(
-        role="Principal Energy Ingestion Officer",
+        role="Principal Energy Market Intelligence Officer",
         goal=(
-            "Parse live EIA storage data, RSS macro headlines, and Alpaca market regime "
-            "into a clean, structured energy analysis matrix identifying inventory surprises, "
-            "forward curve structure (contango vs backwardation), and geopolitical risk."
+            "Identify WHERE WTI crude is cheap (buy low) and WHERE it is expensive (sell high) "
+            "right now. Parse EIA storage data, forward curve structure, crack spreads, and "
+            "macro headlines to determine: is the market at a statistical LOW or HIGH? "
+            "Output: price level assessment (CHEAP / FAIR / EXPENSIVE), inventory signal "
+            "(DRAW=bullish/BUILD=bearish), curve structure (BACKWARDATION=buy/CONTANGO=sell), "
+            "and momentum regime."
         ),
         backstory=(
-            "PhD specialist in physical commodity infrastructure. You synthesize EIA weekly "
-            "petroleum status reports, NYMEX Chapter 200 contract specs, University of Houston "
-            "Futures & Options overheads, and Lacima Group energy derivatives framework into "
-            "precise, structured data models for downstream agent consumption."
+            "PhD specialist in physical commodity markets. You have studied every framework "
+            "in the knowledge base: Oil Trader Academy defines the physical supply chain; "
+            "Trafigura's Commodities Demystified explains contango/backwardation carry; "
+            "EIA Volatility Framework defines what constitutes an inventory surprise. "
+            "Your job is to answer one question: is NOW a good time to BUY LOW or SELL HIGH? "
+            "Backwardation (spot > futures) = market is tight = structurally bullish = buy dips. "
+            "Contango (futures > spot) = market oversupplied = structurally bearish = sell rallies. "
+            "Inventory DRAW (less crude in storage) = demand exceeds supply = buy at lows. "
+            "Inventory BUILD (more crude in storage) = supply glut = sell at highs."
         ),
         verbose=True,
         llm=llm,
@@ -584,17 +593,26 @@ def _build_crew(
 
     # ── Agent 2: Fundamental Analyst ─────────────────────────────────────────
     fundamental_analyst = Agent(
-        role="Elite Energy Macro Derivatives Strategist",
+        role="Elite Energy Derivatives Strategist — Buy Low / Sell Higher",
         goal=(
-            "Synthesize the ingestion matrix into a multi-leg options thesis (Bear Put Spread, "
-            "Bull Call Spread, or Iron Condor) using Black-76 pricing — never BSM for futures. "
-            "Confirm strike selection, expiration (min 21 DTE per Bittman), and premium logic."
+            "Design a trade that BUYS AT THE LOW and SELLS AT A HIGHER PRICE for profit. "
+            "For bullish setups: Bull Call Spread — buy a low strike call (cheap), sell a high "
+            "strike call (expensive) = collect the move upward = profit when price goes higher. "
+            "For bearish setups: Bear Put Spread — buy a high strike put (sell exposure at top), "
+            "sell a low strike put = profit when price falls. "
+            "Price ALL legs using Black-76 (F, K, T, r, sigma) — NEVER BSM for futures. "
+            "Min 21 DTE per Bittman. Entry only at statistically cheap levels per Agent 1."
         ),
         backstory=(
-            "Veteran portfolio director from a top systematic energy hedge fund. You interpret "
-            "OPEC+ output caps, 3-2-1 crack spreads, Cushing storage economics, and IV skew "
-            "through Black-76 (F, K, T, r, sigma) — the correct model for futures options. "
-            "BSM is for equity options; Black-76 is for WTI, Brent, RBOB, ULSD futures."
+            "Veteran systematic energy options trader. You know from Houston Futures & Options "
+            "and Lacima Group that Black-76 is the correct model: the forward price F already "
+            "incorporates carry, so you price the option on F not S. "
+            "You know from Bittman that you never buy options when IV is HIGH (expensive) — "
+            "you buy when IV is LOW (cheap) and sell when IV is HIGH. "
+            "That is the options version of buy low sell high. "
+            "You use crack spreads (3-2-1) from CME specs to determine fair value: "
+            "if gasoline crack spread is wide, crude is underpriced = buy crude options at low strikes. "
+            "You only recommend trades where the maximum profit exceeds the maximum risk by 2:1."
         ),
         verbose=True,
         llm=llm,
@@ -602,21 +620,28 @@ def _build_crew(
 
     # ── Agent 3: Risk Officer ─────────────────────────────────────────────────
     risk_governor = Agent(
-        role="Chief Risk Compliance Executive",
+        role="Chief Risk & Profit Protection Officer",
         goal=(
-            "Enforce ALL hardcoded risk limits from risk_engine.py Section 1. "
-            "Run evaluate_trade() gate. Reject naked shorts immediately. "
-            "Verify Black-76 Greek exposure is within bounds. Output APPROVED or REJECTED."
+            "Approve trades that BUY LOW and SELL HIGHER with positive expected value. "
+            "REJECT any trade where: maximum loss > 2% of $500 account ($10), "
+            "or where you are buying at a statistical HIGH (that is buying expensive, not cheap), "
+            "or where the reward:risk ratio is below 2:1. "
+            "Run evaluate_trade() gate. Enforce ALL Section 1 limits from risk_engine.py. "
+            "Output APPROVED (with profit target) or REJECTED (with reason)."
         ),
         backstory=(
-            "Strict quant auditor trained under EDHEC risk protocols and Hull's Risk Management. "
-            f"You enforce: max risk/trade = {MAX_RISK_PER_TRADE_PCT:.0%} = "
+            "Strict quant auditor. From Hull's Risk Management you know: the purpose of risk "
+            "limits is not to avoid trading — it is to ensure every trade has POSITIVE expected "
+            "value. A trade that buys at the statistical low with a 2:1 reward/risk is APPROVED. "
+            "A trade that buys at the high with no edge is REJECTED immediately. "
+            f"Hard limits: max risk/trade = {MAX_RISK_PER_TRADE_PCT:.0%} = "
             f"${ACCOUNT_EQUITY_USD * MAX_RISK_PER_TRADE_PCT:.2f}, "
-            f"max contracts = {MAX_WTI_CONTRACTS}, max daily loss = ${MAX_DAILY_LOSS_USD:.2f}, "
-            "max delta ±20, max vega ±$500/1%IV, min DTE 21. "
-            "Defined-risk spreads: max capital = 5% portfolio. "
-            "Max risk = (strike width - net premium) × contract multiplier. "
-            "Naked/undefined short exposure → immediate REJECTED."
+            f"max contracts = {MAX_WTI_CONTRACTS}, max daily loss = ${MAX_DAILY_LOSS_USD:.2f}. "
+            "From Bittman: max delta ±20, max vega ±$500/1%IV, min DTE 21. "
+            "From IMCA Handbook: max portfolio heat = 10% = $50. "
+            "Naked shorts = REJECTED immediately (undefined risk). "
+            "Bull spread at statistical high = REJECTED (buying expensive). "
+            "Bull spread at statistical low with 2:1 R/R = APPROVED."
         ),
         verbose=True,
         llm=llm,
@@ -624,16 +649,20 @@ def _build_crew(
 
     # ── Agent 4: Execution Broker ─────────────────────────────────────────────
     execution_broker = Agent(
-        role="Autonomous Execution Desk",
+        role="Autonomous Execution & Profit Logging Desk",
         goal=(
-            "Translate APPROVED risk-gated signals into Alpaca PAPER trading orders. "
-            "Log every decision (approved or rejected) to the SQLite ledger. "
-            "NEVER route to live trading. Paper only: paper-api.alpaca.markets."
+            "Execute APPROVED trades on Alpaca PAPER account. "
+            "Log every trade with: entry price, target price (sell higher), stop price, "
+            "expected profit, and actual profit when closed. "
+            "NEVER route to live trading. Paper only: paper-api.alpaca.markets. "
+            "Every log entry must show: bought at $X, target sell at $Y, profit = $Y-$X."
         ),
         backstory=(
-            "Automated API micro-engine. You interface with Alpaca paper account (port/URL: "
-            "paper-api.alpaca.markets). You record every trade and agent decision in "
-            "crew_trading_ledger.db. You never submit orders that have not cleared the "
+            "Automated API execution engine. You record proof of the buy-low/sell-higher "
+            "strategy: every entry and exit logged with timestamps and P&L. "
+            "You interface with Alpaca paper account (paper-api.alpaca.markets) and "
+            "record every trade to crew_trading_ledger.db with full audit trail. "
+            "You never submit orders that have not cleared the "
             "Risk Officer's evaluate_trade() gate with ApprovalStatus.APPROVED."
         ),
         verbose=True,
@@ -643,20 +672,27 @@ def _build_crew(
     # ── Task 1: Ingest ────────────────────────────────────────────────────────
     task_ingest = Task(
         description=(
-            "Synthesize the following live market data into a structured analysis matrix:\n\n"
+            "PRIMARY OBJECTIVE: Determine if WTI crude oil is at a BUY LOW opportunity "
+            "or a SELL HIGH opportunity RIGHT NOW. Use all data below.\n\n"
+            f"**Multi-Factor Signal Engine Assessment (Bollinger+RSI+Momentum+Carry):**\n"
+            f"{ensemble_summary}\n\n"
             f"**EIA Petroleum Storage (live):**\n{live_eia}\n\n"
             f"**Global Macro Headlines (RSS):**\n{live_rss}\n\n"
             f"**Alpaca Market Regime:**\n{market_regime}\n\n"
-            f"**Institutional Knowledge Context:**\n{knowledge_ctx[:2_500]}\n\n"
-            "Determine:\n"
-            "  1. Forward curve structure: CONTANGO or BACKWARDATION\n"
-            "  2. Inventory surprise direction: BULLISH or BEARISH draw/build\n"
-            "  3. Geopolitical risk level: LOW / MEDIUM / HIGH\n"
-            "  4. Recommended option posture: premium HARVEST (contango) or tail HEDGE (backwardation)"
+            f"**Institutional Knowledge Context:**\n{knowledge_ctx[:2_000]}\n\n"
+            "Answer these questions:\n"
+            "  1. Is price at a STATISTICAL LOW (near lower Bollinger, RSI<45) → BUY OPPORTUNITY?\n"
+            "     OR at a STATISTICAL HIGH (near upper Bollinger, RSI>65) → SELL OPPORTUNITY?\n"
+            "  2. Forward curve: BACKWARDATION (tight market=buy dips) or CONTANGO (glut=sell rallies)?\n"
+            "  3. Inventory: DRAW (bullish=support buying lows) or BUILD (bearish=support selling highs)?\n"
+            "  4. FINAL VERDICT: BUY LOW now / SELL HIGH now / WAIT for better entry?\n"
+            "  Logic: To make profit you must buy at a LOW price and sell at a HIGHER price. "
+            "Never recommend buying when price is at a statistical high. Never recommend selling "
+            "when price is at a statistical low."
         ),
         expected_output=(
-            "Structured markdown matrix with: curve structure, inventory signal, "
-            "geopolitical risk score, and recommended option posture (harvest/hedge)."
+            "Structured matrix: price level (LOW/FAIR/HIGH), curve structure, inventory signal, "
+            "momentum direction, and VERDICT: BUY LOW / SELL HIGH / WAIT with supporting logic."
         ),
         agent=ingestion_officer,
     )
@@ -777,11 +813,44 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
     live_rss      = fetch_rss_headlines()
     market_regime = fetch_market_regime()
 
-    # — Knowledge base query
+    # — Signal engine: buy-low/sell-high assessment for Agent 1 context
+    price_assessment = "UNKNOWN"
+    ensemble_summary = ""
+    try:
+        from signal_engine import get_signal_for_pipeline
+        sig = get_signal_for_pipeline("CL=F", run_validation=False)
+        direction  = sig["direction"]
+        strength   = sig["strength"]
+        score      = sig["score"]
+        val_factor = sig["factors"].get("value_entry", {})
+        mom_factor = sig["factors"].get("momentum", {})
+        carry_factor = sig["factors"].get("carry", {})
+
+        if val_factor.get("score", 0) > 0.2:
+            price_assessment = "CHEAP (statistical low — favorable to BUY)"
+        elif val_factor.get("score", 0) < -0.2:
+            price_assessment = "EXPENSIVE (statistical high — favorable to SELL)"
+        else:
+            price_assessment = "FAIR VALUE (wait for better entry)"
+
+        ensemble_summary = (
+            f"Signal Engine Assessment: {direction} | {strength} | score={score:+.3f}\n"
+            f"  Price level: {price_assessment}\n"
+            f"  Value entry: {val_factor.get('score', 0):+.2f} — {val_factor.get('explanation', '')[:80]}\n"
+            f"  Momentum:    {mom_factor.get('score', 0):+.2f} — {mom_factor.get('explanation', '')[:80]}\n"
+            f"  Carry:       {carry_factor.get('score', 0):+.2f} — {carry_factor.get('explanation', '')[:80]}\n"
+            f"  Gate:        {'APPROVED — trade has positive edge' if sig['approved'] else 'WAIT — no edge at this price level'}"
+        )
+        logger.info("[CrewAgent] Ensemble: %s | price=%s", direction, price_assessment)
+    except Exception as e:
+        ensemble_summary = f"Signal engine unavailable: {e}"
+        logger.warning("[CrewAgent] Signal engine error: %s", e)
+
+    # — Knowledge base query (buy-low/sell-high focus)
     knowledge_ctx = query_knowledge_base(
         knowledge_retriever,
-        "Black-76 energy futures options pricing, contango backwardation, "
-        "SPAN margin, crack spreads, NYMEX MCL contract specifications",
+        "buy low sell high momentum Bollinger RSI Black-76 energy futures options "
+        "contango backwardation carry SPAN margin crack spreads NYMEX MCL specifications",
     )
 
     # — Black-76 Greeks (USO 30-DTE ATM put as representative position)
@@ -816,7 +885,7 @@ async def run_crew_cycle(knowledge_retriever: Optional[Any] = None) -> CrewCycle
     loop = asyncio.get_event_loop()
     result_str = ""
     try:
-        crew = _build_crew(live_eia, live_rss, market_regime, knowledge_ctx, greeks, uso_price)
+        crew = _build_crew(live_eia, live_rss, market_regime, knowledge_ctx, greeks, uso_price, ensemble_summary)
         result_str = str(await loop.run_in_executor(None, crew.kickoff))
     except Exception as e:
         result_str = f"Crew execution error: {e}"
